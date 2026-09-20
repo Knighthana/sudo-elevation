@@ -1,0 +1,5 @@
+#!/bin/sh
+# Test-only SUDO_ASKPASS wrapper that makes the helper print its planned
+# dialog instead of showing one. Never installed by install.sh.
+export SUDO_ELEVATION_UI=print
+exec /usr/local/bin/sudo-askpass "$@"

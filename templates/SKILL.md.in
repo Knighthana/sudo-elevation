@@ -1,0 +1,38 @@
+---
+name: sudo-elevation
+description: Use when a task needs root privileges via sudo on this machine, when running commands as root, or when sudo reports that a password is required. Covers non-interactive `sudo -n`, time-boxed lease requests via `sudo-elevation request`, and the status/lock commands.
+---
+
+# 提权协议（sudo-elevation v@@VERSION@@）
+
+本机 sudo 授权由 sudo-elevation 管理：基础窗口为 **@@BASE_HUMAN@@**；长任务可以向用户申请**时间租约**，用户在图形弹窗中选择批准时长，批准后窗口内 `sudo` 免密码。
+
+## 常规流程
+
+1. 提权命令一律先尝试 `sudo -n <command>`。
+2. 若 `sudo -n` 失败（提示需要密码），说明没有有效租约，**不要**重试裸 `sudo`，改为申请租约：
+   ```bash
+   sudo-elevation request --for <时长> --reason "<简短任务说明>"
+   ```
+3. 用户在弹出的窗口里批准（可修改时长）后，重试 `sudo -n <command>`。
+4. 查看剩余租约：`sudo-elevation status`；主动撤销：`sudo-elevation lock`。
+
+## 时长估算
+
+- 由你主动估算并在 `--for` 中给出，用户可在弹窗中覆盖。
+- 格式：`90s` / `45m` / `2h` / `1d`，裸数字=分钟；无限期用 `until-lock`（用户仍可在弹窗中选择）。
+- 经验值：单条安装/重启服务 `15m`；下载或构建可能数小时的任务 `2h`~`12h`；不确定时宁大勿小（用户可以选择更短）。
+
+## 无图形界面 / 申请失败
+
+若 `request` 报错说没有图形界面，请用户在其终端中执行其一：
+
+- `sudo -v`（仅基础窗口 @@BASE_HUMAN@@）
+- `sudo-elevation grant --for 1h --reason "..."`（终端审批任意时长）
+
+## 禁止事项
+
+- 禁止 `sudo -S`、`echo <密码> | sudo`、`expect`、保存明文密码。
+- 禁止修改 `/etc/sudoers*` 或绕过 sudo-elevation 的授权机制。
+- 不要在对话中要求用户提供密码；密码只能进入本机图形/终端弹窗。
+- 弹窗中显示的"原因"来自你的 `--reason`，用户会看到，保持简短真实。

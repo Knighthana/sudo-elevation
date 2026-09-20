@@ -1,0 +1,194 @@
+#!/bin/bash
+# sudo-askpass - graphical askpass helper for sudo.
+#
+# stdout is reserved for the password: everything else is redirected away
+# and the password is written to the saved original stdout (fd 3).
+#
+# Two modes:
+#   * fresh lease request present -> forms dialog (duration dropdown +
+#     custom duration + password), choice is recorded for `grant`
+#   * no request -> simple password dialog (base window applies)
+set -euo pipefail
+
+SELF_DIR=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=../libexec/sudo-elevation/common.sh
+. "$SELF_DIR/../libexec/sudo-elevation/common.sh"
+
+exec 3>&1
+exec 1>/dev/null
+
+ui=${SUDO_ELEVATION_UI:-auto}
+have_display=0
+if [ -n "${WAYLAND_DISPLAY:-}" ] || [ -n "${DISPLAY:-}" ]; then have_display=1; fi
+if [ "$ui" = auto ]; then
+	if [ "$have_display" = 1 ] && command -v zenity >/dev/null 2>&1; then
+		ui=zenity
+	elif [ "$have_display" = 1 ] && command -v kdialog >/dev/null 2>&1; then
+		ui=kdialog
+	else
+		ui=none
+	fi
+fi
+
+cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/sudo-elevation"
+req_file="$cache_dir/request"
+choice_file="$cache_dir/choice"
+
+fresh=0
+if [ -f "$req_file" ]; then
+	ts=$(se_read_kv "$req_file" ts || true)
+	case "$ts" in ''|*[!0-9]*) ts=0 ;; esac
+	now=$(date +%s)
+	if [ $((now - ts)) -ge 0 ] && [ $((now - ts)) -le "$REQUEST_TTL" ]; then
+		fresh=1
+	fi
+fi
+
+req_min=""
+reason=""
+requester=""
+req_label=""
+if [ "$fresh" = 1 ]; then
+	req_min=$(se_read_kv "$req_file" requested_minutes || true)
+	reason=$(se_read_kv "$req_file" reason || true)
+	requester=$(se_read_kv "$req_file" requester || true)
+	if [ -n "$req_min" ] && [ "$req_min" != "-1" ]; then
+		req_label="$(se_human_minutes "$req_min")（agent 请求）"
+	fi
+fi
+
+labels=("15 分钟" "1 小时" "2 小时" "4 小时" "12 小时" "24 小时" "手动输入…" "仅本次" "直到手动 lock")
+mins=(15 60 120 240 720 1440 "" 0 -1)
+
+map_label() {
+	local want=$1 i
+	for i in "${!labels[@]}"; do
+		if [ "${labels[$i]}" = "$want" ]; then
+			printf '%s' "${mins[$i]}"
+			return 0
+		fi
+	done
+	return 1
+}
+
+write_choice() { # minutes source
+	mkdir -p "$cache_dir"
+	chmod 0700 "$cache_dir" 2>/dev/null || true
+	printf 'chosen_minutes=%s\nsource=%s\nts=%s\n' "$1" "${2:-gui}" "$(date +%s)" > "$choice_file"
+	chmod 0600 "$choice_file" 2>/dev/null || true
+}
+
+fail() { printf 'sudo-askpass: %s\n' "$1" >&2; exit 1; }
+
+reset_choice() {
+	rm -f "$choice_file" 2>/dev/null || true
+}
+
+# --- test hooks -------------------------------------------------------------
+
+case "$ui" in
+	fake)
+		pass=${SUDO_ELEVATION_FAKE_PASSWORD-}
+		[ -n "$pass" ] || fail "fake UI requires SUDO_ELEVATION_FAKE_PASSWORD"
+		if [ "$fresh" = 1 ]; then
+			write_choice "${SUDO_ELEVATION_FAKE_CHOICE:-15}" fake
+		fi
+		printf '%s\n' "$pass" >&3
+		exit 0
+		;;
+	print)
+		printf 'sudo-askpass(print): ui=auto->%s fresh=%s requested=%s reason=%s requester=%s\n' \
+			"$ui" "$fresh" "$req_min" "$reason" "$requester" >&2
+		if [ "$fresh" = 1 ]; then
+			combo="$req_label"
+			for l in "${labels[@]}"; do
+				if [ -z "$combo" ]; then combo="$l"; else combo="$combo|$l"; fi
+			done
+			printf 'sudo-askpass(print): zenity --forms --title="sudo 授权请求" --separator=<US> --add-combo="批准时长" --combo-values="%s" --add-entry=... --add-password=... --timeout=%s\n' \
+				"$combo" "$DIALOG_TIMEOUT" >&2
+		else
+			printf 'sudo-askpass(print): zenity --password --title="sudo 密码（窗口 %s）" --timeout=120\n' \
+				"$(se_human_minutes "$BASE_MINUTES")" >&2
+		fi
+		exit 1
+		;;
+	none)
+		fail "没有可用的图形界面（zenity/kdialog），且无 tty 可提示"
+		;;
+esac
+
+# --- lease request dialog ---------------------------------------------------
+
+if [ "$fresh" = 1 ] && [ "$ui" = zenity ]; then
+	combo="$req_label"
+	for l in "${labels[@]}"; do
+		if [ -z "$combo" ]; then combo="$l"; else combo="$combo|$l"; fi
+	done
+	text=$(printf '请求者: %s\n原因: %s\n\n注意: 批准的是时间窗口；窗口内任意 sudo 命令无需再次确认。\n上方内容由 agent 提供，仅作参考。' \
+		"${requester:-未知}" "${reason:-未提供}")
+	if ! out=$(zenity --forms --title="sudo 授权请求" --text="$text" \
+		--separator=$'\x1f' \
+		--add-combo="批准时长" --combo-values="$combo" \
+		--add-entry="自定义时长（例 90s/45m/2h/1d；填写则忽略左侧选择）" \
+		--add-password="sudo 密码" --timeout="$DIALOG_TIMEOUT" 2>/dev/null); then
+		exit 1
+	fi
+	sel=""
+	entry=""
+	pass=""
+	IFS=$'\x1f' read -r sel entry pass <<<"$out"
+	minutes=""
+	if [ -n "${entry-}" ]; then
+		minutes=$(se_parse_minutes "$entry") || fail "无法解析自定义时长: $entry"
+	elif [ -n "$req_label" ] && [ "$sel" = "$req_label" ]; then
+		minutes=$req_min
+	else
+		minutes=$(map_label "$sel") || minutes=""
+	fi
+	[ -n "$minutes" ] || fail "请选择时长或填写自定义时长"
+	se_valid_minutes "$minutes" || fail "时长超出范围（上限 $MAX_MINUTES 分钟）: $minutes"
+	[ -n "${pass-}" ] || exit 1
+	write_choice "$minutes" gui
+	printf '%s\n' "$pass" >&3
+	exit 0
+fi
+
+# --- lease request dialog (kdialog fallback / two dialogs) ------------------
+
+if [ "$fresh" = 1 ] && [ "$ui" = kdialog ]; then
+	sel=$(kdialog --combobox "批准时长（agent 请求: ${req_label:-未知}）" "${labels[@]}" --default "15 分钟" 2>/dev/null) || exit 1
+	if [ "$sel" = "手动输入…" ]; then
+		entry=$(kdialog --inputbox "自定义时长（例 90s/45m/2h/1d）" 2>/dev/null) || exit 1
+		minutes=$(se_parse_minutes "$entry") || fail "无法解析自定义时长: $entry"
+	elif [ -n "$req_label" ] && [ "$sel" = "$req_label" ]; then
+		minutes=$req_min
+	else
+		minutes=$(map_label "$sel") || minutes=""
+	fi
+	[ -n "$minutes" ] || fail "请选择时长"
+	se_valid_minutes "$minutes" || fail "时长超出范围（上限 $MAX_MINUTES 分钟）: $minutes"
+	pass=$(kdialog --password "sudo 密码（$reason）" 2>/dev/null) || exit 1
+	[ -n "${pass-}" ] || exit 1
+	write_choice "$minutes" gui
+	printf '%s\n' "$pass" >&3
+	exit 0
+fi
+
+# --- simple password dialog (no pending request) ----------------------------
+
+reset_choice
+base_human=$(se_human_minutes "$BASE_MINUTES")
+cmd=$(se_parent_cmd)
+title="sudo 密码（窗口 $base_human）"
+[ -n "$cmd" ] && title="$title — $cmd"
+
+case "$ui" in
+	zenity)
+		pass=$(zenity --password --title="$title" --timeout=120 2>/dev/null) || exit 1
+		;;
+	kdialog)
+		pass=$(kdialog --password "$title" 2>/dev/null) || exit 1
+		;;
+esac
+[ -n "${pass-}" ] || exit 1
+printf '%s\n' "$pass" >&3

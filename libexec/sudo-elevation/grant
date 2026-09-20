@@ -1,0 +1,103 @@
+#!/bin/bash
+# sudo-elevation grant - root-side helper that opens a time-boxed sudo lease.
+#
+# Runs as root, normally via `sudo -A .../grant` from `sudo-elevation request`
+# (GUI flow) or via `sudo .../grant --minutes N` (terminal/headless flow).
+#
+# It rewrites the managed sudoers drop-in with the chosen timestamp_timeout
+# and schedules a restore back to the configured base timeout.
+set -euo pipefail
+
+SELF_DIR=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=common.sh
+. "$SELF_DIR/common.sh"
+
+usage() {
+	echo "usage: grant --user USER (--minutes N | --choice-file FILE)" >&2
+	echo "       [--request-file FILE] [--reason TEXT] [--requested N]" >&2
+}
+
+user=""
+minutes=""
+choice_file=""
+request_file=""
+reason=""
+requested=""
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--user) user=${2-}; shift 2 ;;
+		--minutes) minutes=${2-}; shift 2 ;;
+		--choice-file) choice_file=${2-}; shift 2 ;;
+		--request-file) request_file=${2-}; shift 2 ;;
+		--reason) reason=${2-}; shift 2 ;;
+		--requested) requested=${2-}; shift 2 ;;
+		-h|--help) usage; exit 0 ;;
+		*) echo "grant: unknown argument: $1" >&2; usage; exit 2 ;;
+	esac
+done
+
+[ "$(id -u)" = 0 ] || { echo "grant: must run as root (via sudo)" >&2; exit 1; }
+[ -n "$user" ] || user=${SUDO_USER:-}
+se_valid_user "$user" || { echo "grant: missing or invalid --user" >&2; exit 2; }
+id "$user" >/dev/null 2>&1 || { echo "grant: no such user: $user" >&2; exit 2; }
+
+se_load_config
+
+if [ -n "$choice_file" ]; then
+	chosen=$(se_read_kv "$choice_file" chosen_minutes || true)
+	[ -n "$chosen" ] || { echo "grant: choice file has no chosen_minutes: $choice_file" >&2; exit 3; }
+	minutes=$chosen
+fi
+[ -n "$minutes" ] || { echo "grant: no duration provided" >&2; exit 3; }
+se_valid_minutes "$minutes" || {
+	echo "grant: duration out of range: $minutes (allowed: 0..$MAX_MINUTES minutes, or -1)" >&2
+	exit 3
+}
+
+if [ -n "$request_file" ] && [ -f "$request_file" ]; then
+	[ -n "$reason" ] || reason=$(se_read_kv "$request_file" reason || true)
+	[ -n "$requested" ] || requested=$(se_read_kv "$request_file" requested_minutes || true)
+fi
+case "${requested-}" in ''|*[!0-9.]*) requested=$minutes ;; esac
+reason=$(se_sanitize_reason "$reason")
+
+dest="$SE_SUDOERS_DIR/90-sudo-elevation-$(se_user_slug "$user")"
+tmp=$(mktemp "${TMPDIR:-/tmp}/sudo-elevation-sudoers.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
+se_render_sudoers "$user" "$minutes" "$tmp"
+if ! se_install_sudoers "$tmp" "$dest"; then
+	echo "grant: failed to validate/install $dest" >&2
+	exit 4
+fi
+
+epoch=$(date +%s)
+restore_mech="none"
+if [ "$minutes" != "-1" ]; then
+	restore_mech=$(se_schedule_restore "$user" "$epoch" "$minutes") || restore_mech="failed"
+fi
+
+se_write_lease "$(se_lease_file "$user")" \
+	"epoch=$epoch" \
+	"user=$user" \
+	"minutes=$minutes" \
+	"requested_minutes=$requested" \
+	"reason=$reason" \
+	"granted_at=$(date -Is)" \
+	"restore=$restore_mech"
+
+se_audit "grant user=$user minutes=$minutes requested=$requested restore=$restore_mech reason=\"$reason\""
+
+if [ "$minutes" = "-1" ]; then
+	printf 'sudo-elevation: 已授权 %s（重启前有效；用 sudo-elevation lock 或 sudo -k 撤销）\n' \
+		"$(se_human_minutes -1)"
+else
+	secs=$(awk -v m="$minutes" 'BEGIN{printf "%d", (m*60)+0.5}')
+	expires=$(date -d "@$((epoch + secs))" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || printf '+%ss' "$secs")
+	printf 'sudo-elevation: 已授权 %s（至 %s）；窗口内 sudo -n 可直接执行\n' \
+		"$(se_human_minutes "$minutes")" "$expires"
+	[ "$minutes" = "0" ] && printf 'sudo-elevation: 本次授权为“仅本次”，下一条 sudo 仍会请求确认\n'
+fi
+if [ "$restore_mech" = "failed" ]; then
+	printf 'sudo-elevation: 警告: 无法安排到期自动恢复，配置仍受 sudo 自身超时保护\n' >&2
+fi

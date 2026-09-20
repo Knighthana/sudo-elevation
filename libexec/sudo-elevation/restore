@@ -1,0 +1,62 @@
+#!/bin/bash
+# sudo-elevation restore - root-side helper that ends a lease.
+#
+# Restores the configured base timeout unless a newer lease exists
+# (epoch guard). Can also be forced (used by `sudo-elevation lock`).
+set -euo pipefail
+
+SELF_DIR=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=common.sh
+. "$SELF_DIR/common.sh"
+
+user=""
+epoch=""
+force=0
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--user) user=${2-}; shift 2 ;;
+		--epoch) epoch=${2-}; shift 2 ;;
+		--force) force=1; shift ;;
+		-h|--help) echo "usage: restore --user USER [--epoch N] [--force]" >&2; exit 0 ;;
+		*) echo "restore: unknown argument: $1" >&2; exit 2 ;;
+	esac
+done
+
+[ "$(id -u)" = 0 ] || { echo "restore: must run as root" >&2; exit 1; }
+se_valid_user "$user" || { echo "restore: missing or invalid --user" >&2; exit 2; }
+
+se_load_config
+
+lease=$(se_lease_file "$user")
+if [ "$force" != 1 ]; then
+	lease_epoch=$(se_read_kv "$lease" epoch || true)
+	if [ -z "$lease_epoch" ]; then
+		printf 'restore: no active lease for %s, nothing to do\n' "$user"
+		exit 0
+	fi
+	if [ "$lease_epoch" != "$epoch" ]; then
+		se_audit "restore-skip user=$user incoming_epoch=$epoch current_epoch=$lease_epoch"
+		printf 'restore: lease was replaced (epoch %s != %s), skipping\n' "$lease_epoch" "$epoch"
+		exit 0
+	fi
+fi
+
+dest="$SE_SUDOERS_DIR/90-sudo-elevation-$(se_user_slug "$user")"
+tmp=$(mktemp "${TMPDIR:-/tmp}/sudo-elevation-sudoers.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
+se_render_sudoers "$user" "$BASE_MINUTES" "$tmp"
+if ! se_install_sudoers "$tmp" "$dest"; then
+	echo "restore: failed to validate/install $dest" >&2
+	exit 4
+fi
+
+# A lease overrides the base window: clear the cached timestamp so a short
+# lease cannot leave access for the remainder of the base window.
+if [ -z "$SE_PREFIX" ] && command -v runuser >/dev/null 2>&1; then
+	runuser -u "$user" -- sudo -k >/dev/null 2>&1 || true
+fi
+
+rm -f "$lease"
+se_audit "restore user=$user base=$BASE_MINUTES epoch=${epoch:-force}"
+printf 'sudo-elevation: 租约已结束，恢复基础窗口 %s\n' "$(se_human_minutes "$BASE_MINUTES")"

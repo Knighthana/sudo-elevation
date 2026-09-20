@@ -1,0 +1,170 @@
+#!/bin/bash
+# sudo-elevation - user-facing CLI.
+#
+#   sudo-elevation request --for 2h --reason "..."   ask the user (GUI) for a lease
+#   sudo-elevation grant   --for 1h [--reason ...]   terminal/headless approval path
+#   sudo-elevation status                            show current lease / base window
+#   sudo-elevation lock                              revoke immediately and restore base
+#   sudo-elevation parse <spec>                      print minutes for a duration spec (debug)
+set -euo pipefail
+
+SELF_DIR=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=../libexec/sudo-elevation/common.sh
+. "$SELF_DIR/../libexec/sudo-elevation/common.sh"
+
+ME=$(id -un)
+GRANT_BIN="$SE_LIBEXEC/grant"
+RESTORE_BIN="$SE_LIBEXEC/restore"
+
+usage() {
+	cat <<'EOF'
+usage: sudo-elevation <command> [options]
+
+commands:
+  request --for <duration> [--reason TEXT]   request a time-boxed sudo lease (GUI dialog)
+  grant   --for <duration> [--reason TEXT]   approve a lease from a terminal (headless)
+  status                                     show active lease and base window
+  lock                                       revoke sudo cache and restore base window
+  parse <duration>                           print minutes for a duration spec
+  version                                    print version
+
+duration spec: 90s | 45m | 2h | 1d | 45 (bare number = minutes) | until-lock (-1)
+EOF
+}
+
+cmd=${1:-help}
+shift || true
+
+case "$cmd" in
+	request)
+		spec=""
+		reason=""
+		while [ $# -gt 0 ]; do
+			case "$1" in
+				--for) spec=${2-}; shift 2 ;;
+				--reason) reason=${2-}; shift 2 ;;
+				-h|--help) usage; exit 0 ;;
+				*) echo "request: unknown argument: $1" >&2; exit 2 ;;
+			esac
+		done
+		[ -n "$spec" ] || { echo "request: --for is required (example: --for 2h)" >&2; exit 2; }
+		minutes=$(se_parse_minutes "$spec") || { echo "request: bad duration: $spec" >&2; exit 2; }
+		se_load_config
+		se_valid_minutes "$minutes" || {
+			echo "request: duration out of range: $spec (max $MAX_MINUTES minutes; use until-lock for infinity)" >&2
+			exit 2
+		}
+		requester=${SUDO_ELEVATION_REQUESTER:-}
+		if [ -z "$requester" ]; then
+			requester=$(ps -o comm= -p "$PPID" 2>/dev/null | tr -d ' ' || true)
+		fi
+		[ -n "$requester" ] || requester=unknown
+		cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/sudo-elevation"
+		mkdir -p "$cache_dir"
+		chmod 0700 "$cache_dir" 2>/dev/null || true
+		req_file="$cache_dir/request"
+		choice_file="$cache_dir/choice"
+		{
+			printf 'requested_minutes=%s\n' "$minutes"
+			printf 'reason=%s\n' "$(se_sanitize_reason "$reason")"
+			printf 'requester=%s\n' "$requester"
+			printf 'ts=%s\n' "$(date +%s)"
+		} > "$req_file"
+		chmod 0600 "$req_file" 2>/dev/null || true
+		rm -f "$choice_file"
+		# Force a fresh approval: clear any cached timestamp first, otherwise
+		# sudo would skip the dialog and the user could not pick a duration.
+		sudo -k 2>/dev/null || true
+		trap 'rm -f "$req_file" "$choice_file"' EXIT
+		rc=0
+		sudo -A "$GRANT_BIN" --user "$ME" --choice-file "$choice_file" --request-file "$req_file" || rc=$?
+		exit "$rc"
+		;;
+	grant)
+		spec=""
+		reason=""
+		while [ $# -gt 0 ]; do
+			case "$1" in
+				--for) spec=${2-}; shift 2 ;;
+				--reason) reason=${2-}; shift 2 ;;
+				-h|--help) usage; exit 0 ;;
+				*) echo "grant: unknown argument: $1" >&2; exit 2 ;;
+			esac
+		done
+		[ -n "$spec" ] || { echo "grant: --for is required (example: --for 1h)" >&2; exit 2; }
+		minutes=$(se_parse_minutes "$spec") || { echo "grant: bad duration: $spec" >&2; exit 2; }
+		args=(--user "$ME" --minutes "$minutes")
+		[ -n "$reason" ] && args+=(--reason "$(se_sanitize_reason "$reason")")
+		if [ -t 0 ] || [ -t 1 ]; then
+			exec sudo "$GRANT_BIN" "${args[@]}"
+		else
+			# No terminal (agent): force askpass. On a real tty sudo will
+			# prompt normally instead.
+			exec sudo -A "$GRANT_BIN" "${args[@]}"
+		fi
+		;;
+	status)
+		se_load_config
+		lease=$(se_lease_file "$ME")
+		if [ -f "$lease" ]; then
+			minutes=$(se_read_kv "$lease" minutes || true)
+			epoch=$(se_read_kv "$lease" epoch || true)
+			granted=$(se_read_kv "$lease" granted_at || true)
+			restore=$(se_read_kv "$lease" restore || true)
+			reason=$(se_read_kv "$lease" reason || true)
+			printf '活动租约: %s\n' "$(se_human_minutes "${minutes:-?}")"
+			printf '  原因: %s\n' "${reason:-未提供}"
+			printf '  批准于: %s\n' "${granted:-?}"
+			printf '  自动恢复: %s\n' "${restore:-none}"
+			if [ "$minutes" != "-1" ]; then
+				now=$(date +%s)
+				secs=$(awk -v m="$minutes" 'BEGIN{printf "%d", (m*60)+0.5}')
+				exp=$((epoch + secs))
+				if [ "$now" -lt "$exp" ]; then
+					printf '  剩余: %s\n' "$(se_human_minutes "$(awk -v s="$((exp - now))" 'BEGIN{printf "%.4f", s/60}')")"
+				else
+					printf '  状态: 已到期（等待自动恢复任务）\n'
+				fi
+			fi
+		else
+			printf '无活动租约（基础窗口 %s）\n' "$(se_human_minutes "$BASE_MINUTES")"
+		fi
+		managed="$SE_SUDOERS_DIR/90-sudo-elevation-$(se_user_slug "$ME")"
+		if [ "$(id -u)" = 0 ]; then
+			cur=$(grep -h 'timestamp_timeout' "$managed" 2>/dev/null | cut -d= -f2 || true)
+		else
+			cur=$(sudo -n grep -h 'timestamp_timeout' "$managed" 2>/dev/null | cut -d= -f2 || true)
+		fi
+		if [ -n "$cur" ]; then
+			printf '当前 sudoers 窗口: %s 分钟\n' "$cur"
+		fi
+		exit 0
+		;;
+	lock)
+		restored=0
+		if sudo -n "$RESTORE_BIN" --user "$ME" --force >/dev/null 2>&1; then
+			restored=1
+		fi
+		sudo -k 2>/dev/null || true
+		if [ "$restored" = 1 ]; then
+			printf 'sudo-elevation: 已撤销缓存并恢复基础窗口 %s\n' "$(se_human_minutes "$BASE_MINUTES")"
+		else
+			printf 'sudo-elevation: 已撤销当前 sudo 缓存；配置将在下次授权/安装时恢复（sudo 超时仍会保护）\n'
+		fi
+		;;
+	parse)
+		se_parse_minutes "${1-}" || { echo "parse: bad duration: ${1-}" >&2; exit 2; }
+		printf '\n'
+		;;
+	version)
+		printf 'sudo-elevation %s\n' "$SE_VERSION"
+		;;
+	help|-h|--help)
+		usage
+		;;
+	*)
+		echo "sudo-elevation: unknown command: $cmd" >&2
+		usage
+		exit 2
+		;;
+esac
