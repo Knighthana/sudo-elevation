@@ -111,6 +111,7 @@ write_config() {
 		printf 'MAX_MINUTES=%s\n' "$MAX_MINUTES"
 		printf 'DIALOG_TIMEOUT=%s\n' "$DIALOG_TIMEOUT"
 		printf 'REQUEST_TTL=%s\n' "$REQUEST_TTL"
+		printf 'GUI_BACKEND=auto\n'
 	} > "$tmp"
 	run se_install_file "$tmp" "$SE_CONFIG" 0644
 	rm -f "$tmp"

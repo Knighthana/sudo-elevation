@@ -17,6 +17,9 @@ SELF_DIR=$(cd "$(dirname "$0")" && pwd)
 exec 3>&1
 exec 1>/dev/null
 
+se_load_config
+se_apply_gui_backend "$GUI_BACKEND"
+
 ui=${SUDO_ELEVATION_UI:-auto}
 have_display=0
 if [ -n "${WAYLAND_DISPLAY:-}" ] || [ -n "${DISPLAY:-}" ]; then have_display=1; fi
@@ -97,15 +100,13 @@ case "$ui" in
 		exit 0
 		;;
 	print)
-		printf 'sudo-askpass(print): ui=auto->%s fresh=%s requested=%s reason=%s requester=%s\n' \
-			"$ui" "$fresh" "$req_min" "$reason" "$requester" >&2
+		printf 'sudo-askpass(print): ui=auto->%s fresh=%s requested=%s reason=%s requester=%s backend=%s\n' \
+			"$ui" "$fresh" "$req_min" "$reason" "$requester" "${GDK_BACKEND:-default}" >&2
 		if [ "$fresh" = 1 ]; then
-			combo="$req_label"
-			for l in "${labels[@]}"; do
-				if [ -z "$combo" ]; then combo="$l"; else combo="$combo|$l"; fi
-			done
-			printf 'sudo-askpass(print): zenity --forms --title="sudo 授权请求" --separator=<US> --add-combo="批准时长" --combo-values="%s" --add-entry=... --add-password=... --timeout=%s\n' \
-				"$combo" "$DIALOG_TIMEOUT" >&2
+			printf 'sudo-askpass(print): [1] zenity --list --radiolist --title="sudo 授权请求 — 选择时长" --hide-header --ok-label="继续" --column <radio> --column "批准时长" --print-column=2 --timeout=%s (requested first: %s)\n' \
+				"$DIALOG_TIMEOUT" "$req_label" >&2
+			printf 'sudo-askpass(print): [1b] zenity --entry --title="自定义时长" (only when 手动输入… selected)\n' >&2
+			printf 'sudo-askpass(print): [2] zenity --password --title="sudo 密码 — 批准 <duration>" --timeout=120\n' >&2
 		else
 			printf 'sudo-askpass(print): zenity --password --title="sudo 密码（窗口 %s）" --timeout=120\n' \
 				"$(se_human_minutes "$BASE_MINUTES")" >&2
@@ -120,33 +121,61 @@ esac
 # --- lease request dialog ---------------------------------------------------
 
 if [ "$fresh" = 1 ] && [ "$ui" = zenity ]; then
-	combo="$req_label"
-	for l in "${labels[@]}"; do
-		if [ -z "$combo" ]; then combo="$l"; else combo="$combo|$l"; fi
-	done
 	text=$(printf '请求者: %s\n原因: %s\n\n注意: 批准的是时间窗口；窗口内任意 sudo 命令无需再次确认。\n上方内容由 agent 提供，仅作参考。' \
 		"${requester:-未知}" "${reason:-未提供}")
-	if ! out=$(zenity --forms --title="sudo 授权请求" --text="$text" \
-		--separator=$'\x1f' \
-		--add-combo="批准时长" --combo-values="$combo" \
-		--add-entry="自定义时长（例 90s/45m/2h/1d；填写则忽略左侧选择）" \
-		--add-password="sudo 密码" --timeout="$DIALOG_TIMEOUT" 2>/dev/null); then
+
+	# In-window radio list instead of a combo box: WSLg is slow to remove the
+	# separate popup window a GTK combo creates, which makes it linger.
+	row_labels=()
+	row_mins=()
+	if [ -n "$req_min" ]; then
+		row_labels+=("$req_label")
+		row_mins+=("$req_min")
+	fi
+	for i in "${!labels[@]}"; do
+		if [ -n "$req_min" ] && [ "${mins[$i]}" = "$req_min" ]; then
+			continue
+		fi
+		row_labels+=("${labels[$i]}")
+		row_mins+=("${mins[$i]}")
+	done
+
+	list_args=(--list --radiolist --title="sudo 授权请求 — 选择时长" --text="$text" \
+		--hide-header --ok-label="继续" --width=420 --height=380 \
+		--column "选择" --column "批准时长" --print-column=2 --timeout="$DIALOG_TIMEOUT")
+	for i in "${!row_labels[@]}"; do
+		if [ "$i" = 0 ]; then
+			list_args+=(TRUE "${row_labels[$i]}")
+		else
+			list_args+=(FALSE "${row_labels[$i]}")
+		fi
+	done
+	if ! sel=$(zenity "${list_args[@]}" 2>/dev/null); then
 		exit 1
 	fi
-	sel=""
-	entry=""
-	pass=""
-	IFS=$'\x1f' read -r sel entry pass <<<"$out"
+
 	minutes=""
-	if [ -n "${entry-}" ]; then
+	for i in "${!row_labels[@]}"; do
+		if [ "${row_labels[$i]}" = "$sel" ]; then
+			minutes=${row_mins[$i]}
+			break
+		fi
+	done
+	if [ "$sel" = "手动输入…" ]; then
+		if ! entry=$(zenity --entry --title="自定义时长" \
+			--text="例: 90s / 45m / 2h / 1d（裸数字 = 分钟）" --timeout=120 2>/dev/null); then
+			exit 1
+		fi
 		minutes=$(se_parse_minutes "$entry") || fail "无法解析自定义时长: $entry"
-	elif [ -n "$req_label" ] && [ "$sel" = "$req_label" ]; then
-		minutes=$req_min
-	else
-		minutes=$(map_label "$sel") || minutes=""
 	fi
-	[ -n "$minutes" ] || fail "请选择时长或填写自定义时长"
+	[ -n "$minutes" ] || fail "请选择时长"
 	se_valid_minutes "$minutes" || fail "时长超出范围（上限 $MAX_MINUTES 分钟）: $minutes"
+
+	# Separate password dialog: Enter activates OK there; zenity --forms
+	# ignores Enter inside its fields.
+	if ! pass=$(zenity --password --title="sudo 密码 — 批准 $(se_human_minutes "$minutes")" --timeout=120 2>/dev/null); then
+		exit 1
+	fi
 	[ -n "${pass-}" ] || exit 1
 	write_choice "$minutes" gui
 	printf '%s\n' "$pass" >&3
@@ -167,7 +196,7 @@ if [ "$fresh" = 1 ] && [ "$ui" = kdialog ]; then
 	fi
 	[ -n "$minutes" ] || fail "请选择时长"
 	se_valid_minutes "$minutes" || fail "时长超出范围（上限 $MAX_MINUTES 分钟）: $minutes"
-	pass=$(kdialog --password "sudo 密码（$reason）" 2>/dev/null) || exit 1
+	pass=$(kdialog --password "sudo 密码（批准 $(se_human_minutes "$minutes")）" 2>/dev/null) || exit 1
 	[ -n "${pass-}" ] || exit 1
 	write_choice "$minutes" gui
 	printf '%s\n' "$pass" >&3

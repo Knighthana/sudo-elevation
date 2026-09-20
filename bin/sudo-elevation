@@ -136,7 +136,7 @@ case "$cmd" in
 			cur=$(sudo -n grep -h 'timestamp_timeout' "$managed" 2>/dev/null | cut -d= -f2 || true)
 		fi
 		if [ -n "$cur" ]; then
-			printf '当前 sudoers 窗口: %s 分钟\n' "$cur"
+			printf '当前 sudoers 窗口: %s\n' "$(se_human_minutes "$cur")"
 		fi
 		exit 0
 		;;

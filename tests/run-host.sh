@@ -48,7 +48,7 @@ ok "install tree complete"
 log "installed CLI works with prefix"
 export SUDO_ELEVATION_PREFIX="$SB/root"
 SE="$SB/root/usr/local/bin/sudo-elevation"
-[ "$("$SE" version)" = "sudo-elevation 0.1.0" ] || die "bad version"
+[ "$("$SE" version)" = "sudo-elevation $(cat "$REPO/VERSION")" ] || die "bad version"
 [ "$("$SE" parse 90s)" = "1.5" ] || die "bad parse"
 [ "$("$SE" parse 1d)" = "1440" ] || die "bad parse"
 status_out=$("$SE" status)

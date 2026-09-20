@@ -71,7 +71,10 @@ if ! se_install_sudoers "$tmp" "$dest"; then
 	exit 4
 fi
 
-epoch=$(date +%s)
+now=$(date +%s)
+# Unique lease id: second-resolution time is not enough because two leases can
+# be granted within the same second, which would defeat the epoch guard.
+epoch="${now}-$$-${RANDOM}"
 restore_mech="none"
 if [ "$minutes" != "-1" ]; then
 	restore_mech=$(se_schedule_restore "$user" "$epoch" "$minutes") || restore_mech="failed"
@@ -93,7 +96,7 @@ if [ "$minutes" = "-1" ]; then
 		"$(se_human_minutes -1)"
 else
 	secs=$(awk -v m="$minutes" 'BEGIN{printf "%d", (m*60)+0.5}')
-	expires=$(date -d "@$((epoch + secs))" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || printf '+%ss' "$secs")
+	expires=$(date -d "@$((now + secs))" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || printf '+%ss' "$secs")
 	printf 'sudo-elevation: 已授权 %s（至 %s）；窗口内 sudo -n 可直接执行\n' \
 		"$(se_human_minutes "$minutes")" "$expires"
 	[ "$minutes" = "0" ] && printf 'sudo-elevation: 本次授权为“仅本次”，下一条 sudo 仍会请求确认\n'

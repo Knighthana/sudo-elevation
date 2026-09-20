@@ -5,6 +5,10 @@ set -euo pipefail
 REPO=${REPO:-/src}
 ASKPASS="$REPO/tests/docker/fake-askpass"
 
+# Marker so the driver can tell "scenario finished, docker CLI hung afterwards"
+# apart from "scenario itself is stuck".
+trap 'rc=$?; echo "SCENARIO-DONE rc=$rc"' EXIT
+
 log() { printf '\n== %s ==\n' "$*"; }
 ok() { printf '  ok: %s\n' "$*"; }
 die() {

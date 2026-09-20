@@ -28,6 +28,7 @@ BASE_MINUTES=15
 MAX_MINUTES=525600
 DIALOG_TIMEOUT=300
 REQUEST_TTL=300
+GUI_BACKEND=auto
 
 se_load_config() {
 	local file="${SUDO_ELEVATION_CONFIG:-$SE_CONFIG}"
@@ -37,6 +38,14 @@ se_load_config() {
 		case "$line" in ''|'#'*) continue ;; esac
 		key=${line%%=*}
 		val=${line#*=}
+		case "$key" in
+			GUI_BACKEND)
+				case "$val" in
+					auto|x11|wayland) GUI_BACKEND=$val ;;
+				esac
+				continue
+				;;
+		esac
 		case "$val" in ''|*[!0-9.]*) continue ;; esac
 		case "$key" in
 			BASE_MINUTES) BASE_MINUTES=$val ;;
@@ -45,6 +54,22 @@ se_load_config() {
 			REQUEST_TTL) REQUEST_TTL=$val ;;
 		esac
 	done < "$file"
+}
+
+# WSLg's Wayland compositor mishandles GTK4 popup/menu input; XWayland works.
+# auto: X11 on WSL, toolkit default elsewhere. Override with GUI_BACKEND in
+# /etc/sudo-elevation.conf (auto|x11|wayland).
+se_apply_gui_backend() {
+	local backend=${1:-auto} is_wsl=0
+	if grep -qiE 'microsoft|wsl' /proc/sys/kernel/osrelease 2>/dev/null; then
+		is_wsl=1
+	fi
+	case "$backend" in
+		x11) [ -n "${DISPLAY:-}" ] && export GDK_BACKEND=x11 ;;
+		wayland) [ -n "${WAYLAND_DISPLAY:-}" ] && export GDK_BACKEND=wayland ;;
+		auto) [ "$is_wsl" = 1 ] && [ -n "${DISPLAY:-}" ] && export GDK_BACKEND=x11 ;;
+	esac
+	return 0
 }
 
 # se_parse_minutes SPEC -> minutes on stdout; supports:
