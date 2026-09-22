@@ -42,7 +42,7 @@ agent: sudo -n apt-get install ...        # 窗口内免确认
 ## 安装
 
 ```bash
-git clone <repo-url> sudo-elevation
+git clone git@github.com:Knighthana/sudo-elevation.git sudo-elevation
 cd sudo-elevation
 sudo ./install.sh                 # 默认用户 $SUDO_USER，基础窗口 15m
 ```
