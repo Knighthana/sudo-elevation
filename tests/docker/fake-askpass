@@ -2,6 +2,7 @@
 # Test-only SUDO_ASKPASS wrapper. Injects a scripted UI response and delegates
 # to the installed helper. This file is never installed by install.sh.
 export SUDO_ELEVATION_UI=fake
-export SUDO_ELEVATION_FAKE_CHOICE="$(cat /tmp/se-test-choice 2>/dev/null || echo 15)"
-export SUDO_ELEVATION_FAKE_PASSWORD="$(cat /tmp/se-test-password 2>/dev/null || echo testpass)"
+SUDO_ELEVATION_FAKE_CHOICE="$(cat /tmp/se-test-choice 2>/dev/null || echo 15)"
+SUDO_ELEVATION_FAKE_PASSWORD="$(cat /tmp/se-test-password 2>/dev/null || echo testpass)"
+export SUDO_ELEVATION_FAKE_CHOICE SUDO_ELEVATION_FAKE_PASSWORD
 exec /usr/local/bin/sudo-askpass "$@"

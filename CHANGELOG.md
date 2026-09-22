@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.1.3 - 2026-09-22
+
+- install: 强制校验 `sudo >= 1.8.21`（租约模型依赖该版本引入的 `timestamp_type`，
+  解析兼容新旧 `sudo -V` 首行格式）；zenity/kdialog 皆无时警告并继续安装
+  （GUI request 不可用，可走终端 `grant`），不再静默。
+- feat: `sudo-elevation uninstall [--purge]` CLI 子命令——`install.sh` 随安装部署到
+  libexec，卸载无需再 clone 仓库。
+- fix: 卸载清理 `sudo.conf.bak.*` 备份与 `/run/sudo-elevation` 运行时目录残留；
+  安装时备份 prune 只保留最新一份。
+- security: 租约文件改为 `0600` 且属主为租约用户（同机其他用户不可读 reason，
+  `status` 本人仍可读）。
+- change: 生产安装默认剥离 askpass 的 fake/print 测试钩子，测试套件用
+  `--test-hooks` 保留。
+- UI: kdialog 分支由 combobox 改为同窗 `--radiolist`，与 zenity 两步流程对齐；
+  修复 agent 请求 `until-lock` 时时长行显示为空的问题。
+- docs: SKILL 时长估算改为场景化规则（用户在场申请短时长；无人值守按任务
+  最长可能时间估足，避免中途到期无人可批）。
+- ci: 新增 GitHub Actions（shellcheck + host 沙箱 + Docker 矩阵）；
+  测试新增 kdialog stub 场景与 CLI 卸载场景。
+
 ## 0.1.2 - 2026-09-22
 
 - fix: `status` 剩余时间按租约 ID 的前导时间戳换算；0.1.1 起 epoch 为唯一 ID

@@ -7,6 +7,7 @@ ASKPASS="$REPO/tests/docker/fake-askpass"
 
 # Marker so the driver can tell "scenario finished, docker CLI hung afterwards"
 # apart from "scenario itself is stuck".
+# shellcheck disable=SC2154  # rc is assigned within this very trap
 trap 'rc=$?; echo "SCENARIO-DONE rc=$rc"' EXIT
 
 log() { printf '\n== %s ==\n' "$*"; }
@@ -38,7 +39,9 @@ setup_user() {
 	}
 }
 
-install_se() { "$REPO/install.sh" --user tester "$@"; }
+# Test-suite installs keep the fake/print askpass hooks; production strips them.
+install_se() { "$REPO/install.sh" --user tester --test-hooks "$@"; }
+install_se_plain() { "$REPO/install.sh" --user tester "$@"; }
 
 # set_ui CHOICE [PASSWORD]
 set_ui() {

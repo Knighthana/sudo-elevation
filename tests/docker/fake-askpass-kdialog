@@ -1,0 +1,6 @@
+#!/bin/sh
+# Test-only SUDO_ASKPASS wrapper that drives the kdialog code path with a
+# PATH stub instead of a real KDE dialog. Never installed by install.sh.
+export SUDO_ELEVATION_UI=kdialog
+export PATH="/src/tests/docker/stubs:$PATH"
+exec /usr/local/bin/sudo-askpass "$@"

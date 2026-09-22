@@ -7,6 +7,8 @@
 #
 # SUDO_ELEVATION_PREFIX may be set to relocate every system path (used by
 # the test-suite to run the installer inside a sandbox).
+#
+# shellcheck disable=SC2034  # SE_*/config vars are consumed by sourcing scripts
 
 SE_PREFIX="${SUDO_ELEVATION_PREFIX:-}"
 
@@ -142,6 +144,24 @@ se_valid_user() {
 	esac
 }
 
+# se_version_ge "version line" MIN -> 0 when version >= MIN.
+# Accepts full `sudo -V` first lines ("Sudo version 1.9.15p5",
+# "sudo version 1.8.16"); a trailing pN patch level is ignored.
+se_version_ge() {
+	local got want
+	got=$(printf '%s' "${1-}" | grep -oE '[0-9]+(\.[0-9]+)*' | head -n 1)
+	want=$(printf '%s' "${2-}" | grep -oE '[0-9]+(\.[0-9]+)*' | head -n 1)
+	[ -n "$got" ] && [ -n "$want" ] || return 1
+	awk -v a="$got" -v b="$want" 'BEGIN{
+		split(a, pa, "."); split(b, pb, ".")
+		for (i = 1; i <= 3; i++) {
+			if ((pa[i] + 0) > (pb[i] + 0)) exit 0
+			if ((pa[i] + 0) < (pb[i] + 0)) exit 1
+		}
+		exit 0
+	}'
+}
+
 se_user_slug() { printf '%s' "$1" | tr -c 'A-Za-z0-9_-' '_'; }
 
 se_home_of() { getent passwd "$1" 2>/dev/null | cut -d: -f6; }
@@ -173,15 +193,18 @@ se_install_sudoers() { # src dest
 
 se_lease_file() { printf '%s/%s.lease' "$SE_RUNTIME_DIR" "$(se_user_slug "${1-}")"; }
 
-se_write_lease() { # file "key=value"...
-	local file=$1
-	shift
+se_write_lease() { # file owner "key=value"...
+	local file=$1 owner=$2
+	shift 2
 	mkdir -p "$SE_RUNTIME_DIR" 2>/dev/null || true
 	chmod 0755 "$SE_RUNTIME_DIR" 2>/dev/null || true
 	: > "$file"
 	local kv
 	for kv in "$@"; do printf '%s\n' "$kv" >> "$file"; done
-	chmod 0644 "$file" 2>/dev/null || true
+	# Owner-only: the lease user must still read it via `status`, but other
+	# users on the same host must not see the reason/audit metadata.
+	chmod 0600 "$file" 2>/dev/null || true
+	[ -n "$owner" ] && chown "$owner" "$file" 2>/dev/null || true
 }
 
 se_audit() {

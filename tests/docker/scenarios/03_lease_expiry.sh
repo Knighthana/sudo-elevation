@@ -16,8 +16,10 @@ if ! as_tester /usr/local/bin/sudo-elevation request --for 24s --reason "docker 
 	die "request failed"
 fi
 assert_contains /etc/sudoers.d/90-sudo-elevation-tester "timestamp_timeout=0.4"
-assert_file /run/sudo-elevation/tester.lease
-assert_contains /run/sudo-elevation/tester.lease "minutes=0.4"
+	assert_file /run/sudo-elevation/tester.lease
+	assert_mode /run/sudo-elevation/tester.lease 600
+	assert_eq "$(stat -c %U /run/sudo-elevation/tester.lease)" tester "lease owned by user"
+	assert_contains /run/sudo-elevation/tester.lease "minutes=0.4"
 assert_contains /run/sudo-elevation/tester.lease "reason=docker lease expiry test"
 assert_contains /run/sudo-elevation/tester.lease "restore=setsid"
 assert_contains /var/log/sudo-elevation.log "grant user=tester minutes=0.4"

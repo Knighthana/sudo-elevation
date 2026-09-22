@@ -25,6 +25,7 @@ commands:
   grant   --for <duration> [--reason TEXT]   approve a lease from a terminal (headless)
   status                                     show active lease and base window
   lock                                       revoke sudo cache and restore base window
+  uninstall [--purge]                        remove sudo-elevation (--purge drops the audit log too)
   parse <duration>                           print minutes for a duration spec
   version                                    print version
 
@@ -154,6 +155,28 @@ case "$cmd" in
 			printf 'sudo-elevation: 已撤销缓存并恢复基础窗口 %s\n' "$(se_human_minutes "$BASE_MINUTES")"
 		else
 			printf 'sudo-elevation: 已撤销当前 sudo 缓存；配置将在下次授权/安装时恢复（sudo 超时仍会保护）\n'
+		fi
+		;;
+	uninstall)
+		purge=()
+		while [ $# -gt 0 ]; do
+			case "$1" in
+				--purge) purge=(--purge); shift ;;
+				-h|--help) usage; exit 0 ;;
+				*) echo "uninstall: unknown argument: $1" >&2; exit 2 ;;
+			esac
+		done
+		installer="$SE_LIBEXEC/install.sh"
+		if [ ! -f "$installer" ]; then
+			echo "uninstall: $installer not found (install first, or run ./install.sh --uninstall from the repository)" >&2
+			exit 1
+		fi
+		if [ -n "${SUDO_ELEVATION_PREFIX:-}" ]; then
+			exec "$installer" --prefix "$SUDO_ELEVATION_PREFIX" --uninstall ${purge[@]+"${purge[@]}"}
+		elif [ -t 0 ] || [ -t 1 ]; then
+			exec sudo "$installer" --uninstall ${purge[@]+"${purge[@]}"}
+		else
+			exec sudo -A "$installer" --uninstall ${purge[@]+"${purge[@]}"}
 		fi
 		;;
 	parse)

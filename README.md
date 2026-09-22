@@ -58,8 +58,10 @@ sudo ./install.sh                 # 默认用户 $SUDO_USER，基础窗口 15m
 --uninstall [--purge] 卸载（--purge 连审计日志一起删）
 ```
 
-依赖：`bash`、`sudo` >= 1.8.21、`awk`/`grep`/`coreutils`/`util-linux`；
-图形弹窗需要 `zenity`（GNOME/Mint；KDE 自动降级 kdialog）；WSL2 需要 WSLg。
+依赖：`bash`、`sudo` >= **1.8.21**（安装时强制校验——租约模型依赖 1.8.21 引入的
+`timestamp_type`，更早版本会明确报错拒绝安装）、`awk`/`grep`/`coreutils`/`util-linux`；
+图形弹窗需要 `zenity`（GNOME/Mint）或 `kdialog`（KDE 自动降级），**两者皆无时安装仅警告并继续**
+（`request` 不可用，改用终端 `grant` 审批）；WSL2 需要 WSLg。
 
 ## 使用
 
@@ -82,8 +84,9 @@ sudo-elevation lock
 ```
 
 时长格式：`90s` / `45m` / `2h` / `1d`，裸数字=分钟，`until-lock`=直到手动撤销。
-弹窗分两步：先在同窗单选列表里选时长（agent 请求值默认选中，含“手动输入…”
-与“仅本次”），再输密码；密码框内**回车即提交**（选时长窗点“继续”）。
+弹窗分两步，zenity 与 kdialog 均为**同窗 radio 单选**：先在单选列表里选时长
+（agent 请求值默认选中，含“手动输入…”与“仅本次”），再输密码；密码框内**回车即提交**
+（选时长窗点“继续”）。
 
 ## 行为细节
 
@@ -105,20 +108,33 @@ sudo-elevation lock
 ## 测试
 
 ```bash
-./tests/run-host.sh                  # 非 root 沙箱：安装/卸载/冲突/幂等
+./tests/run-host.sh                  # 非 root 沙箱：安装/卸载/冲突/幂等/钩子剥离/版本比较
 tests/docker/run.sh                  # Ubuntu 24.04 + Debian 12 容器矩阵
 SE_TEST_IMAGES="debian:12" tests/docker/run.sh 03_lease_expiry.sh
 ```
 
 Docker 场景覆盖：安装/幂等/权限位、askpass 认证与错误密码、租约到期与自动恢复、
-仅本次、until-lock + lock、卸载保留第三方配置、外来 `Path askpass` 冲突、
-headless grant、弹窗参数、epoch 守卫、无 GUI 快速失败。
+仅本次、until-lock + lock、CLI 卸载（含备份/运行时目录清理）、卸载保留第三方配置、
+外来 `Path askpass` 冲突、headless grant、弹窗参数（zenity 与 kdialog）、
+epoch 守卫、无 GUI 快速失败。
+
+推送/PR 时 GitHub Actions（`.github/workflows/ci.yml`）自动执行
+shellcheck + host 沙箱 + Docker 矩阵。
+
+**自动化覆盖不到、发布前真机手测**：zenity/kdialog 真实弹窗点击交互、
+WSL2/WSLg 下 `GDK_BACKEND=x11` 的输入行为。
 
 ## 卸载
 
 ```bash
-sudo ./install.sh --uninstall        # --purge 同时删除 /var/log/sudo-elevation.log
+sudo-elevation uninstall              # 无需仓库；--purge 连审计日志一起删
+# 或在仓库目录: sudo ./install.sh --uninstall [--purge]
 ```
+
+卸载会：终止进行中的恢复任务并撤销租约、按 manifest 清理**所有**曾安装用户的
+sudoers/skill、从 `sudo.conf` 只摘除标记块（外来内容原样保留）、删除全部安装文件
+（含 `sudo.conf.bak.*` 备份与 `/run/sudo-elevation`），最后 `visudo -c` 自检；
+审计日志默认保留，`--purge` 才删除。
 
 ## 故障排查
 

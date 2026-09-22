@@ -11,8 +11,15 @@
 #   ~/.config/opencode/skill/sudo-elevation/SKILL.md
 set -euo pipefail
 
-REPO_DIR=$(cd "$(dirname "$0")" && pwd)
-VERSION=$(cat "$REPO_DIR/VERSION" 2>/dev/null || printf 'dev')
+SELF_DIR=$(cd "$(dirname "$0")" && pwd)
+REPO_DIR=$SELF_DIR
+# Repo checkout has VERSION next to this script; the installed copy in
+# libexec reads the manifest copy under share/ instead.
+VERSION=$(cat "$REPO_DIR/VERSION" 2>/dev/null \
+	|| cat "${REPO_DIR%/libexec/sudo-elevation}/share/sudo-elevation/VERSION" 2>/dev/null \
+	|| printf 'dev')
+INSTALLED_MODE=0
+[ -f "$SELF_DIR/common.sh" ] && INSTALLED_MODE=1
 
 PREFIX=""
 TARGET_USER=""
@@ -21,6 +28,7 @@ MAX_SPEC="365d"
 DRY=0
 FORCE=0
 DO_SKILL=1
+TEST_HOOKS=0
 SKILL_DIR=""
 ACTION=install
 PURGE=0
@@ -42,6 +50,8 @@ options:
   --prefix DIR          install everything under DIR (testing/sandbox)
   --skill-dir DIR       override opencode skill directory
   --no-skill            do not install the opencode skill
+  --test-hooks          keep fake/print test hooks in the installed askpass
+                        (for the test-suite only; default strips them)
   --dry-run             print actions without changing anything
   --force               take over an existing foreign `Path askpass` setting
   --uninstall           remove sudo-elevation
@@ -59,6 +69,7 @@ while [ $# -gt 0 ]; do
 		--prefix) PREFIX=${2-}; shift 2 ;;
 		--skill-dir) SKILL_DIR=${2-}; shift 2 ;;
 		--no-skill) DO_SKILL=0; shift ;;
+		--test-hooks) TEST_HOOKS=1; shift ;;
 		--dry-run|-n) DRY=1; shift ;;
 		--force|-f) FORCE=1; shift ;;
 		--uninstall) ACTION=uninstall; shift ;;
@@ -73,8 +84,13 @@ done
 id "$TARGET_USER" >/dev/null 2>&1 || die "no such user: $TARGET_USER"
 
 if [ -n "$PREFIX" ]; then export SUDO_ELEVATION_PREFIX=$PREFIX; fi
-# shellcheck source=libexec/sudo-elevation/common.sh
-. "$REPO_DIR/libexec/sudo-elevation/common.sh"
+if [ "$INSTALLED_MODE" = 1 ]; then
+	# shellcheck source=common.sh
+	. "$SELF_DIR/common.sh"
+else
+	# shellcheck source=libexec/sudo-elevation/common.sh
+	. "$REPO_DIR/libexec/sudo-elevation/common.sh"
+fi
 
 if [ "$(id -u)" != 0 ] && [ -z "$PREFIX" ]; then
 	die "must run as root (sudo ./install.sh)"
@@ -84,6 +100,14 @@ strip_block() {
 	awk '
 		/^# >>> sudo-elevation >>>[[:space:]]*$/ { skip = 1; next }
 		/^# <<< sudo-elevation <<<[[:space:]]*$/ { skip = 0; next }
+		skip != 1 { print }
+	'
+}
+
+strip_test_hooks() {
+	awk '
+		/^# >>> test hooks >>>[[:space:]]*$/ { skip = 1; next }
+		/^# <<< test hooks <<<[[:space:]]*$/ { skip = 0; next }
 		skip != 1 { print }
 	'
 }
@@ -141,6 +165,8 @@ write_sudo_conf() {
 	fi
 	if [ -f "$SE_SUDO_CONF" ]; then
 		cp -a "$SE_SUDO_CONF" "$SE_SUDO_CONF.bak.$(date +%Y%m%d%H%M%S)"
+		# Keep only the newest backup; repeated installs must not pile up.
+		{ ls -1t "$SE_SUDO_CONF".bak.* 2>/dev/null || true; } | tail -n +2 | xargs -r rm -f -- || true
 	fi
 	se_install_file "$tmp" "$SE_SUDO_CONF" 0644
 	rm -f "$tmp"
@@ -185,23 +211,44 @@ install_skill() {
 }
 
 do_install() {
+	if [ "$INSTALLED_MODE" = 1 ]; then
+		die "install requires the repository checkout (the installed copy under libexec only supports --uninstall/--version/--help)"
+	fi
+
 	say "sudo-elevation $VERSION"
 	say "  user: $TARGET_USER"
 	say "  base window: $(se_human_minutes "$BASE_MINUTES")"
 	say "  max lease:   $(se_human_minutes "$MAX_MINUTES")"
 	say "  prefix:      ${PREFIX:-/}"
 
+	command -v sudo >/dev/null 2>&1 || die "sudo not found"
+	sudo_ver=$(sudo -V 2>/dev/null | head -n 1 || true)
+	se_version_ge "$sudo_ver" "1.8.21" \
+		|| die "sudo too old (${sudo_ver:-unknown}): >= 1.8.21 required (timestamp_type)"
+	if ! command -v zenity >/dev/null 2>&1 && ! command -v kdialog >/dev/null 2>&1; then
+		say "警告: 未找到 zenity/kdialog，GUI 弹窗不可用；"
+		say "      'sudo-elevation request' 将失败，可用终端 'sudo-elevation grant' 审批。"
+	fi
+
 	check_foreign_askpass
 
 	run install -d -m 0755 "$SE_BIN_DIR" "$SE_LIBEXEC" "$SE_SHARE" "$SE_SUDOERS_DIR"
 
-	local f
-	for f in sudo-askpass sudo-elevation; do
-		run se_install_file "$REPO_DIR/bin/$f" "$SE_BIN_DIR/$f" 0755
-	done
+	local f tmp_ask
+	if [ "$TEST_HOOKS" = 1 ]; then
+		run se_install_file "$REPO_DIR/bin/sudo-askpass" "$SE_BIN_DIR/sudo-askpass" 0755
+	else
+		tmp_ask=$(mktemp)
+		strip_test_hooks < "$REPO_DIR/bin/sudo-askpass" > "$tmp_ask"
+		run se_install_file "$tmp_ask" "$SE_BIN_DIR/sudo-askpass" 0755
+		rm -f "$tmp_ask"
+	fi
+	run se_install_file "$REPO_DIR/bin/sudo-elevation" "$SE_BIN_DIR/sudo-elevation" 0755
 	for f in grant restore; do
 		run se_install_file "$REPO_DIR/libexec/sudo-elevation/$f" "$SE_LIBEXEC/$f" 0755
 	done
+	# Self-copy so `sudo-elevation uninstall` works without a repo checkout.
+	run se_install_file "$REPO_DIR/install.sh" "$SE_LIBEXEC/install.sh" 0755
 	run se_install_file "$REPO_DIR/libexec/sudo-elevation/common.sh" "$SE_LIBEXEC/common.sh" 0644
 	run se_install_file "$REPO_DIR/VERSION" "$SE_SHARE/VERSION" 0644
 	run se_install_file "$REPO_DIR/LICENSE" "$SE_SHARE/LICENSE" 0644
@@ -308,11 +355,13 @@ do_uninstall() {
 	fi
 
 	run rm -f "$SE_BIN_DIR/sudo-askpass" "$SE_BIN_DIR/sudo-elevation"
-	run rm -f "$SE_LIBEXEC/common.sh" "$SE_LIBEXEC/grant" "$SE_LIBEXEC/restore"
+	run rm -f "$SE_LIBEXEC/common.sh" "$SE_LIBEXEC/grant" "$SE_LIBEXEC/restore" "$SE_LIBEXEC/install.sh"
 	rmdir "$SE_LIBEXEC" 2>/dev/null || true
 	run rm -f "$SE_SHARE/VERSION" "$SE_SHARE/LICENSE" "$SE_SHARE/manifest"
 	rmdir "$SE_SHARE" 2>/dev/null || true
 	run rm -f "$SE_CONFIG"
+	rm -f "$SE_SUDO_CONF".bak.* 2>/dev/null || true
+	rmdir "$SE_RUNTIME_DIR" 2>/dev/null || true
 	[ "$PURGE" = 1 ] && run rm -f "$SE_LOG"
 
 	if [ "$DRY" != 1 ] && [ "$(id -u)" = 0 ] && [ -z "$SE_PREFIX" ]; then

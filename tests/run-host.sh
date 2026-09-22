@@ -8,7 +8,6 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 SB=$(mktemp -d /tmp/sudo-elevation-host.XXXXXX)
 trap 'rm -rf "$SB"' EXIT
 ME=$(id -un)
-FAIL=0
 
 ok() { printf '  ok: %s\n' "$*"; }
 die() {
@@ -34,7 +33,8 @@ log "prefix install"
 "$REPO/install.sh" --prefix "$SB/root" --user "$ME" --skill-dir "$SB/skill" >/dev/null
 for f in usr/local/bin/sudo-askpass usr/local/bin/sudo-elevation \
 	usr/local/libexec/sudo-elevation/grant usr/local/libexec/sudo-elevation/restore \
-	usr/local/libexec/sudo-elevation/common.sh etc/sudo-elevation.conf \
+	usr/local/libexec/sudo-elevation/install.sh usr/local/libexec/sudo-elevation/common.sh \
+	etc/sudo-elevation.conf \
 	etc/sudoers.d/90-sudo-elevation-"$ME" usr/local/share/sudo-elevation/manifest; do
 	[ -f "$SB/root/$f" ] || die "missing $f"
 done
@@ -44,6 +44,31 @@ grep -q 'timestamp_timeout=15' "$SB/root/etc/sudoers.d/90-sudo-elevation-$ME" ||
 grep -q 'Path askpass' "$SB/root/etc/sudo.conf" || die "no askpass block"
 grep -q 'sudo-elevation request' "$SB/skill/SKILL.md" || die "skill not rendered"
 ok "install tree complete"
+
+log "production install strips test hooks"
+if grep -q 'SUDO_ELEVATION_FAKE_PASSWORD' "$SB/root/usr/local/bin/sudo-askpass"; then
+	die "test hooks present in production askpass"
+fi
+"$REPO/install.sh" --prefix "$SB/root" --user "$ME" --skill-dir "$SB/skill" --test-hooks >/dev/null
+grep -q 'SUDO_ELEVATION_FAKE_PASSWORD' "$SB/root/usr/local/bin/sudo-askpass" \
+	|| die "test hooks missing with --test-hooks"
+"$REPO/install.sh" --prefix "$SB/root" --user "$ME" --skill-dir "$SB/skill" >/dev/null
+if grep -q 'SUDO_ELEVATION_FAKE_PASSWORD' "$SB/root/usr/local/bin/sudo-askpass"; then
+	die "re-install without --test-hooks left hooks behind"
+fi
+ok "hook stripping works"
+
+log "sudo version comparison (>= 1.8.21 for timestamp_type)"
+bash -c '
+	. "$1/libexec/sudo-elevation/common.sh" || exit 1
+	se_version_ge "Sudo version 1.9.15p5" 1.8.21 || exit 1
+	se_version_ge "sudo version 1.8.21" 1.8.21 || exit 1
+	se_version_ge "sudo version 1.8.27p1" 1.8.21 || exit 1
+	if se_version_ge "sudo version 1.8.20" 1.8.21; then exit 1; fi
+	if se_version_ge "sudo version 1.7.3" 1.8.21; then exit 1; fi
+	exit 0
+' _ "$REPO" || die "version comparison"
+ok "version compare"
 
 log "installed CLI works with prefix"
 export SUDO_ELEVATION_PREFIX="$SB/root"
@@ -87,10 +112,11 @@ grep -q 'Path askpass /bin/false' "$SB/conflict/etc/sudo.conf" || die "foreign l
 grep -q '^# >>> sudo-elevation >>>$' "$SB/conflict/etc/sudo.conf" || die "block missing"
 ok "--force works"
 
-log "uninstall"
-"$REPO/install.sh" --prefix "$SB/root" --user "$ME" --skill-dir "$SB/skill" --uninstall >/dev/null
+log "uninstall via CLI subcommand (prefix sandbox, no sudo needed)"
+"$SE" uninstall >/dev/null
 for f in usr/local/bin/sudo-askpass usr/local/bin/sudo-elevation \
-	usr/local/libexec/sudo-elevation/grant etc/sudo-elevation.conf \
+	usr/local/libexec/sudo-elevation/grant usr/local/libexec/sudo-elevation/install.sh \
+	usr/local/libexec/sudo-elevation/restore etc/sudo-elevation.conf \
 	etc/sudoers.d/90-sudo-elevation-"$ME" usr/local/share/sudo-elevation/manifest; do
 	[ ! -e "$SB/root/$f" ] || die "leftover $f"
 done

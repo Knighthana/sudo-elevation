@@ -57,22 +57,13 @@ if [ "$fresh" = 1 ]; then
 	requester=$(se_read_kv "$req_file" requester || true)
 	if [ -n "$req_min" ] && [ "$req_min" != "-1" ]; then
 		req_label="$(se_human_minutes "$req_min")（agent 请求）"
+	elif [ "$req_min" = "-1" ]; then
+		req_label="直到手动 lock（agent 请求）"
 	fi
 fi
 
 labels=("15 分钟" "1 小时" "2 小时" "4 小时" "12 小时" "24 小时" "手动输入…" "仅本次" "直到手动 lock")
 mins=(15 60 120 240 720 1440 "" 0 -1)
-
-map_label() {
-	local want=$1 i
-	for i in "${!labels[@]}"; do
-		if [ "${labels[$i]}" = "$want" ]; then
-			printf '%s' "${mins[$i]}"
-			return 0
-		fi
-	done
-	return 1
-}
 
 write_choice() { # minutes source
 	mkdir -p "$cache_dir"
@@ -87,8 +78,8 @@ reset_choice() {
 	rm -f "$choice_file" 2>/dev/null || true
 }
 
-# --- test hooks -------------------------------------------------------------
-
+# --- test hooks (stripped on install unless --test-hooks) ---------------------
+# >>> test hooks >>>
 case "$ui" in
 	fake)
 		pass=${SUDO_ELEVATION_FAKE_PASSWORD-}
@@ -113,10 +104,12 @@ case "$ui" in
 		fi
 		exit 1
 		;;
-	none)
-		fail "没有可用的图形界面（zenity/kdialog），且无 tty 可提示"
-		;;
 esac
+# <<< test hooks <<<
+
+if [ "$ui" = none ]; then
+	fail "没有可用的图形界面（zenity/kdialog），且无 tty 可提示"
+fi
 
 # --- lease request dialog ---------------------------------------------------
 
@@ -182,17 +175,46 @@ if [ "$fresh" = 1 ] && [ "$ui" = zenity ]; then
 	exit 0
 fi
 
-# --- lease request dialog (kdialog fallback / two dialogs) ------------------
+# --- lease request dialog (kdialog fallback: same-window radio list) ---------
 
 if [ "$fresh" = 1 ] && [ "$ui" = kdialog ]; then
-	sel=$(kdialog --combobox "批准时长（agent 请求: ${req_label:-未知}）" "${labels[@]}" --default "15 分钟" 2>/dev/null) || exit 1
-	if [ "$sel" = "手动输入…" ]; then
-		entry=$(kdialog --inputbox "自定义时长（例 90s/45m/2h/1d）" 2>/dev/null) || exit 1
+	text="批准时长（agent 请求: ${req_label:-未提供}）\n请求者: ${requester:-未知}\n原因: ${reason:-未提供}\n\n批准的是时间窗口；窗口内任意 sudo 命令无需再次确认。"
+
+	row_labels=()
+	row_mins=()
+	if [ -n "$req_min" ]; then
+		row_labels+=("$req_label")
+		row_mins+=("$req_min")
+	fi
+	for i in "${!labels[@]}"; do
+		if [ -n "$req_min" ] && [ "${mins[$i]}" = "$req_min" ]; then
+			continue
+		fi
+		row_labels+=("${labels[$i]}")
+		row_mins+=("${mins[$i]}")
+	done
+
+	# --radiolist returns the selected tag; rows use rN tags so labels can
+	# contain any text. Exactly one row must start "on" or kdialog aborts.
+	list_args=(--radiolist "$text")
+	for i in "${!row_labels[@]}"; do
+		if [ "$i" = 0 ]; then st=on; else st=off; fi
+		list_args+=("r$i" "${row_labels[$i]}" "$st")
+	done
+	sel_tag=$(kdialog "${list_args[@]}" 2>/dev/null) || exit 1
+
+	minutes=""
+	sel_label=""
+	for i in "${!row_labels[@]}"; do
+		if [ "$sel_tag" = "r$i" ]; then
+			minutes=${row_mins[$i]}
+			sel_label=${row_labels[$i]}
+			break
+		fi
+	done
+	if [ "$sel_label" = "手动输入…" ]; then
+		entry=$(kdialog --inputbox "自定义时长（例: 90s / 45m / 2h / 1d，裸数字 = 分钟）" 2>/dev/null) || exit 1
 		minutes=$(se_parse_minutes "$entry") || fail "无法解析自定义时长: $entry"
-	elif [ -n "$req_label" ] && [ "$sel" = "$req_label" ]; then
-		minutes=$req_min
-	else
-		minutes=$(map_label "$sel") || minutes=""
 	fi
 	[ -n "$minutes" ] || fail "请选择时长"
 	se_valid_minutes "$minutes" || fail "时长超出范围（上限 $MAX_MINUTES 分钟）: $minutes"

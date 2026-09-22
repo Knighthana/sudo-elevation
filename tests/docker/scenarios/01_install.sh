@@ -3,17 +3,21 @@ set -euo pipefail
 . /src/tests/docker/lib.sh
 
 setup_user
-log "install"
-install_se
+log "install (plain: production strips test hooks)"
+install_se_plain
 
 assert_file /usr/local/bin/sudo-askpass
 assert_mode /usr/local/bin/sudo-askpass 755
+assert_not_contains /usr/local/bin/sudo-askpass "# >>> test hooks >>>"
+assert_not_contains /usr/local/bin/sudo-askpass "SUDO_ELEVATION_FAKE_PASSWORD"
 assert_file /usr/local/bin/sudo-elevation
 assert_mode /usr/local/bin/sudo-elevation 755
 assert_file /usr/local/libexec/sudo-elevation/grant
 assert_mode /usr/local/libexec/sudo-elevation/grant 755
 assert_file /usr/local/libexec/sudo-elevation/restore
 assert_mode /usr/local/libexec/sudo-elevation/restore 755
+assert_file /usr/local/libexec/sudo-elevation/install.sh
+assert_mode /usr/local/libexec/sudo-elevation/install.sh 755
 assert_file /usr/local/libexec/sudo-elevation/common.sh
 assert_mode /usr/local/libexec/sudo-elevation/common.sh 644
 
@@ -40,9 +44,13 @@ assert_ok visudo -c
 assert_ok sudo -V
 
 log "idempotent re-install"
-install_se
+install_se_plain
 assert_eq "$(grep -c '^Path askpass' /etc/sudo.conf)" 1 "no duplicate Path askpass"
 assert_eq "$(grep -c '# >>> sudo-elevation >>>' /etc/sudo.conf)" 1 "single marker block"
+
+log "--test-hooks keeps the fake/print hooks"
+install_se >/dev/null
+assert_contains /usr/local/bin/sudo-askpass "SUDO_ELEVATION_FAKE_PASSWORD"
 
 log "duration parsing"
 assert_eq "$(/usr/local/bin/sudo-elevation parse 90s)" 1.5

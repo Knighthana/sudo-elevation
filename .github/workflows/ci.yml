@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: shellcheck
+        run: |
+          shellcheck -S warning \
+            install.sh \
+            bin/sudo-elevation bin/sudo-askpass \
+            libexec/sudo-elevation/grant libexec/sudo-elevation/restore \
+            libexec/sudo-elevation/common.sh \
+            tests/run-host.sh \
+            tests/docker/run.sh tests/docker/lib.sh \
+            tests/docker/fake-askpass tests/docker/fake-askpass-print \
+            tests/docker/fake-askpass-kdialog tests/docker/stubs/kdialog \
+            tests/docker/scenarios/*.sh
+
+      - name: Host sandbox tests
+        run: ./tests/run-host.sh
+
+      - name: Docker matrix (Ubuntu 24.04 + Debian 12)
+        run: tests/docker/run.sh

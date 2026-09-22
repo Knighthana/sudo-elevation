@@ -1,0 +1,10 @@
+#!/bin/bash
+# kdialog stub: records argv, answers with canned values.
+# Radiolist returns the first row's tag (r0 = requested duration).
+printf '%s\n' "$*" >> /tmp/se-kdialog.log
+case "$*" in
+	*--radiolist*) printf 'r0\n' ;;
+	*--password*) printf 'testpass\n' ;;
+	*--inputbox*) printf '30m\n' ;;
+esac
+exit 0

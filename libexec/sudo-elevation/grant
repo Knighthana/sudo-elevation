@@ -80,7 +80,7 @@ if [ "$minutes" != "-1" ]; then
 	restore_mech=$(se_schedule_restore "$user" "$epoch" "$minutes") || restore_mech="failed"
 fi
 
-se_write_lease "$(se_lease_file "$user")" \
+se_write_lease "$(se_lease_file "$user")" "$user" \
 	"epoch=$epoch" \
 	"user=$user" \
 	"minutes=$minutes" \
