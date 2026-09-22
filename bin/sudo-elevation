@@ -117,9 +117,13 @@ case "$cmd" in
 			printf '  批准于: %s\n' "${granted:-?}"
 			printf '  自动恢复: %s\n' "${restore:-none}"
 			if [ "$minutes" != "-1" ]; then
+				# epoch is a unique id "start-pid-random"; only the leading
+				# timestamp is numeric ($((epoch ...)) would subtract the rest).
+				start=${epoch%%-*}
+				case "$start" in ''|*[!0-9]*) start=0 ;; esac
 				now=$(date +%s)
 				secs=$(awk -v m="$minutes" 'BEGIN{printf "%d", (m*60)+0.5}')
-				exp=$((epoch + secs))
+				exp=$((start + secs))
 				if [ "$now" -lt "$exp" ]; then
 					printf '  剩余: %s\n' "$(se_human_minutes "$(awk -v s="$((exp - now))" 'BEGIN{printf "%.4f", s/60}')")"
 				else

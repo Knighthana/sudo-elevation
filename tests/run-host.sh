@@ -55,6 +55,21 @@ status_out=$("$SE" status)
 grep -q '无活动租约' <<<"$status_out" || die "bad status"
 ok "CLI works"
 
+log "status remaining time uses the leading timestamp of the lease id"
+lease="$SB/root/run/sudo-elevation/$ME.lease"
+mkdir -p "$(dirname "$lease")"
+# Unique id format "start-pid-random": pid/random must not leak into the
+# arithmetic (the old code did $((epoch + secs)) and subtracted them).
+start=$(($(date +%s) - 1800))
+printf 'epoch=%s-5000-7\nuser=%s\nminutes=60\ngranted_at=test\nreason=test\nrestore=none\n' \
+	"$start" "$ME" > "$lease"
+status_out=$("$SE" status)
+grep -qF '活动租约' <<<"$status_out" || die "lease not reported: $status_out"
+grep -qF '已到期' <<<"$status_out" && die "active lease reported as expired: $status_out"
+grep -qE '剩余: 30(\.0)? 分钟' <<<"$status_out" || die "bad remaining time: $status_out"
+rm -f "$lease"
+ok "remaining time correct"
+
 log "idempotent re-install"
 "$REPO/install.sh" --prefix "$SB/root" --user "$ME" --skill-dir "$SB/skill" >/dev/null
 [ "$(grep -c '# >>> sudo-elevation >>>' "$SB/root/etc/sudo.conf")" = 1 ] || die "duplicate block"
