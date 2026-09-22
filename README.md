@@ -99,6 +99,15 @@ sudo-elevation lock
 
 ## 安全模型
 
+> **sudo 的三条经典准则：**
+>
+> - Respect the privacy of others.（尊重他人的隐私。）
+> - Think before you type.（三思而后行。）
+> - With great power comes great responsibility.（能力越大，责任越大。）
+
+使用本项目时，默认你已经充分了解了将管理员权限授权给**任何其他人**所带来的风险——**Agent 也不例外**，
+且你作为授权者始终需要对被授权者后续所有的行为负责，因此再谨慎也不为过。
+
 - 批准的是**时间窗口**，不是具体命令；窗口内同用户任意进程都可提权。
 - 弹窗中的“原因”来自 agent，可能被同用户进程伪造（弹窗会标注）。
 - 不保存密码；不修改系统 sudoers 语义之外的任何授权；卸载后完全还原。
