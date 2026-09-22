@@ -121,8 +121,15 @@ epoch 守卫、无 GUI 快速失败。
 推送/PR 时 GitHub Actions（`.github/workflows/ci.yml`）自动执行
 shellcheck + host 沙箱 + Docker 矩阵。
 
-**自动化覆盖不到、发布前真机手测**：zenity/kdialog 真实弹窗点击交互、
-WSL2/WSLg 下 `GDK_BACKEND=x11` 的输入行为。
+**真机手测**（自动化覆盖不到的部分）：
+
+- ✅ **WSL2/WSLg 已通过**（2026-09-23，Ubuntu 24.04.5 + zenity 4.0.1 +
+  kernel 6.18 microsoft-standard-WSL2）：radio 列表时长预选、
+  `GDK_BACKEND=x11`（XWayland）、密码框回车提交、`until-lock` 标签非空、
+  取消授权弹窗不破坏进行中的租约与 `sudo -n`、跨终端 global timestamp。
+- ⏳ 仍待手测：kdialog 真实弹窗（需 KDE 环境）、`systemd-run` 恢复分支
+  （本机 PID1 为 WSL `init`，走 `setsid`；需启用 systemd 的 Ubuntu 桌面）、
+  `GUI_BACKEND=wayland` 覆盖。
 
 ## 卸载
 

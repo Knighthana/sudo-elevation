@@ -19,6 +19,11 @@
   最长可能时间估足，避免中途到期无人可批）。
 - ci: 新增 GitHub Actions（shellcheck + host 沙箱 + Docker 矩阵）；
   测试新增 kdialog stub 场景与 CLI 卸载场景。
+- fix: `request` 在已有有效 timestamp 时改为 `sudo -k -A`（仅本次命令忽略缓存
+  以强制弹窗，取消时不清除缓存）；timestamp 无效时仍用 `sudo -A`（成功后正常
+  刷新缓存）。此前无条件 `sudo -k` 会在用户取消授权弹窗后清掉全局 timestamp，
+  导致租约仍有效但 `sudo -n` 立即失败、需重新输一次密码。
+- docs: 标记 WSL2/WSLg 真机手测通过（Ubuntu 24.04.5 + zenity 4.0.1）。
 
 ## 0.1.2 - 2026-09-22
 

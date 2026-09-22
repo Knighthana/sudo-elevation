@@ -73,12 +73,19 @@ case "$cmd" in
 		} > "$req_file"
 		chmod 0600 "$req_file" 2>/dev/null || true
 		rm -f "$choice_file"
-		# Force a fresh approval: clear any cached timestamp first, otherwise
-		# sudo would skip the dialog and the user could not pick a duration.
-		sudo -k 2>/dev/null || true
 		trap 'rm -f "$req_file" "$choice_file"' EXIT
 		rc=0
-		sudo -A "$GRANT_BIN" --user "$ME" --choice-file "$choice_file" --request-file "$req_file" || rc=$?
+		# Force the approval dialog even when a cached timestamp would let sudo
+		# skip it, without wiping an active lease's credentials if the user cancels:
+		#   - timestamp valid   -> `sudo -k -A`: ignores the cache so askpass runs
+		#                          (duration picker), but keeps the cache on cancel;
+		#   - timestamp invalid -> `sudo -A`: prompts anyway; on success sudo
+		#                          refreshes the cache so `sudo -n` works right after.
+		if sudo -n true 2>/dev/null; then
+			sudo -k -A "$GRANT_BIN" --user "$ME" --choice-file "$choice_file" --request-file "$req_file" || rc=$?
+		else
+			sudo -A "$GRANT_BIN" --user "$ME" --choice-file "$choice_file" --request-file "$req_file" || rc=$?
+		fi
 		exit "$rc"
 		;;
 	grant)
