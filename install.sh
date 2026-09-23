@@ -32,11 +32,23 @@ TEST_HOOKS=0
 SKILL_DIR=""
 ACTION=install
 PURGE=0
+USER_INSTALL=0
+NO_SYSTEM=0
+SE_NEW_BAK=""
 
 die() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 say() { printf '%s\n' "$*"; }
 run() {
 	if [ "$DRY" = 1 ]; then say "[dry-run] $*"; else "$@"; fi
+}
+# Directory creation honoring user mode: when root installs into a user's
+# home, build user-owned trees via runuser so later unattended reinstalls work.
+mk_dir() {
+	if [ "$USER_INSTALL" = 1 ] && [ "$(id -u)" = 0 ] && command -v runuser >/dev/null 2>&1; then
+		run runuser -u "$TARGET_USER" -- install -d -m 0755 "$@"
+	else
+		run install -d -m 0755 "$@"
+	fi
 }
 
 usage() {
@@ -47,15 +59,25 @@ options:
   --user USER           target user (default: $SUDO_USER or current user)
   --base-timeout SPEC   base window (default 15m; examples: 15m, 30m; strict: 0)
   --max-timeout SPEC    maximum approvable lease (default 365d; non-build hosts: 12h/7d)
-  --prefix DIR          install everything under DIR (testing/sandbox)
+  --prefix DIR          install everything under DIR (testing/sandbox; not with --user-install)
+  --user-install        XDG user layout: payload into ~/.local, config into
+                        ~/.config (no /usr/local pollution). System files
+                        (sudoers drop-in, sudo.conf marker) still need root
+                        unless --no-system is given.
+  --no-system           skip system files (sudoers drop-in, sudo.conf marker);
+                        prints the exact root snippet for an admin instead.
+                        Without the snippet applied the tool stays inert.
   --skill-dir DIR       override opencode skill directory
   --no-skill            do not install the opencode skill
   --test-hooks          keep fake/print test hooks in the installed askpass
                         (for the test-suite only; default strips them)
   --dry-run             print actions without changing anything
   --force               take over an existing foreign `Path askpass` setting
-  --uninstall           remove sudo-elevation
-  --purge               with --uninstall: also remove the audit log
+  --uninstall           remove software but keep config (sudoers at base window,
+                        sudo.conf marker, config, manifest, skill, audit log)
+  --purge               with --uninstall: remove config and ALL data too,
+                        including files for users missing from the manifest
+                        (use when the old data itself is suspect)
   --version             print version
   --help                this help
 EOF
@@ -67,6 +89,8 @@ while [ $# -gt 0 ]; do
 		--base-timeout) BASE_SPEC=${2-}; shift 2 ;;
 		--max-timeout) MAX_SPEC=${2-}; shift 2 ;;
 		--prefix) PREFIX=${2-}; shift 2 ;;
+		--user-install) USER_INSTALL=1; shift ;;
+		--no-system) NO_SYSTEM=1; shift ;;
 		--skill-dir) SKILL_DIR=${2-}; shift 2 ;;
 		--no-skill) DO_SKILL=0; shift ;;
 		--test-hooks) TEST_HOOKS=1; shift ;;
@@ -83,6 +107,31 @@ done
 [ -n "$TARGET_USER" ] || TARGET_USER=${SUDO_USER:-$(id -un)}
 id "$TARGET_USER" >/dev/null 2>&1 || die "no such user: $TARGET_USER"
 
+[ "$USER_INSTALL" = 1 ] && [ -n "$PREFIX" ] && die "--user-install cannot be combined with --prefix"
+
+# XDG user layout must be resolved BEFORE common.sh is sourced: it computes
+# every SE_* path at source time. getent is used directly (se_home_of lives
+# in common.sh). Only the target user's own XDG env is honored; otherwise
+# defaults under their $HOME apply (root's XDG_* must never leak in).
+if [ "$USER_INSTALL" = 1 ]; then
+	_UI_HOME=$(getent passwd "$TARGET_USER" 2>/dev/null | cut -d: -f6)
+	[ -n "$_UI_HOME" ] || die "cannot find home for $TARGET_USER"
+	if [ "$(id -un)" = "$TARGET_USER" ]; then
+		_UI_DATA=${XDG_DATA_HOME:-$_UI_HOME/.local/share}
+		_UI_CONF=${XDG_CONFIG_HOME:-$_UI_HOME/.config}
+		_UI_STATE=${XDG_STATE_HOME:-$_UI_HOME/.local/state}
+	else
+		_UI_DATA=$_UI_HOME/.local/share
+		_UI_CONF=$_UI_HOME/.config
+		_UI_STATE=$_UI_HOME/.local/state
+	fi
+	export SUDO_ELEVATION_BINDIR="$_UI_HOME/.local/bin"
+	export SUDO_ELEVATION_LIBEXECDIR="$_UI_HOME/.local/libexec/sudo-elevation"
+	export SUDO_ELEVATION_SHAREDIR="$_UI_DATA/sudo-elevation"
+	export SUDO_ELEVATION_CONFIG="$_UI_CONF/sudo-elevation/config"
+	export SUDO_ELEVATION_INSTALL_MODE=user
+fi
+
 if [ -n "$PREFIX" ]; then export SUDO_ELEVATION_PREFIX=$PREFIX; fi
 if [ "$INSTALLED_MODE" = 1 ]; then
 	# shellcheck source=common.sh
@@ -92,8 +141,11 @@ else
 	. "$REPO_DIR/libexec/sudo-elevation/common.sh"
 fi
 
-if [ "$(id -u)" != 0 ] && [ -z "$PREFIX" ]; then
-	die "must run as root (sudo ./install.sh)"
+# System files (sudoers drop-in, sudo.conf marker) always need root, no
+# matter the layout. --no-system skips them (fully unprivileged degraded
+# install); anything else without root (and without --prefix sandbox) dies.
+if [ "$NO_SYSTEM" = 0 ] && [ "$(id -u)" != 0 ] && [ -z "$PREFIX" ]; then
+	die "must run as root (sudo ./install.sh), or add --no-system for a degraded user install"
 fi
 
 strip_block() {
@@ -114,6 +166,7 @@ strip_test_hooks() {
 
 check_foreign_askpass() {
 	local tmp
+	[ "$NO_SYSTEM" = 1 ] && return 0
 	[ -f "$SE_SUDO_CONF" ] || return 0
 	[ "$FORCE" = 1 ] && return 0
 	tmp=$(mktemp)
@@ -163,10 +216,18 @@ write_sudo_conf() {
 		rm -f "$tmp"
 		return 0
 	fi
+	if [ "$NO_SYSTEM" = 1 ]; then
+		rm -f "$tmp"
+		SE_NEW_BAK=""
+		return 0
+	fi
 	if [ -f "$SE_SUDO_CONF" ]; then
 		# Backup names carry PID so two installs within the same second
-		# never collide; prune still keeps only the newest one.
-		cp -a "$SE_SUDO_CONF" "$SE_SUDO_CONF.bak.$(date +%Y%m%d%H%M%S).$$"
+		# never collide; prune still keeps only the newest one. The surviving
+		# name is recorded in the manifest so uninstall deletes exactly it
+		# (never an admin's own bak.* file).
+		SE_NEW_BAK="$SE_SUDO_CONF.bak.$(date +%Y%m%d%H%M%S).$$"
+		cp -a "$SE_SUDO_CONF" "$SE_NEW_BAK"
 		# Keep only the newest backup; repeated installs must not pile up.
 		# Loop instead of xargs so unusual filenames stay safe (names are
 		# controlled timestamps, but stay defensive here as root).
@@ -174,9 +235,27 @@ write_sudo_conf() {
 			[ -n "$old" ] || continue
 			rm -f -- "$old" || true
 		done
+		SE_NEW_BAK=$(basename "$(ls -1t "$SE_SUDO_CONF".bak.* 2>/dev/null | head -n 1 || true)")
+	else
+		SE_NEW_BAK=""
 	fi
 	se_install_file "$tmp" "$SE_SUDO_CONF" 0644
 	rm -f "$tmp"
+}
+
+# Root snippet for --no-system: the two blocks an admin must apply.
+print_system_snippet() {
+	local dest
+	dest="$SE_SUDOERS_DIR/90-sudo-elevation-$(se_user_slug "$TARGET_USER")"
+	say ""
+	say "--no-system: system files were NOT touched. Ask an admin to apply:"
+	say "  1) sudoers drop-in $dest :"
+	say "       Defaults:$TARGET_USER timestamp_type=global"
+	say "       Defaults:$TARGET_USER timestamp_timeout=$BASE_MINUTES"
+	say "  2) append to $SE_SUDO_CONF :"
+	say "       # >>> sudo-elevation >>>"
+	say "       Path askpass $SE_BIN_DIR/sudo-askpass"
+	say "       # <<< sudo-elevation <<<"
 }
 
 manifest_users() {
@@ -243,7 +322,14 @@ do_install() {
 
 	check_foreign_askpass
 
-	run install -d -m 0755 "$SE_BIN_DIR" "$SE_LIBEXEC" "$SE_SHARE" "$SE_SUDOERS_DIR"
+	if [ "$NO_SYSTEM" = 1 ]; then
+		mk_dir "$SE_BIN_DIR" "$SE_LIBEXEC" "$SE_SHARE"
+	else
+		mk_dir "$SE_BIN_DIR" "$SE_LIBEXEC" "$SE_SHARE"
+		run install -d -m 0755 "$SE_SUDOERS_DIR"
+	fi
+	# Config/receipt live in files whose parent may not exist (XDG homes).
+	mk_dir "$(dirname "$SE_CONFIG")"
 
 	local f tmp_ask
 	if [ "$TEST_HOOKS" = 1 ]; then
@@ -275,6 +361,11 @@ do_install() {
 	if [ "$DRY" = 1 ]; then
 		say "[dry-run] install $dest (timestamp_timeout=$BASE_MINUTES)"
 		rm -f "$tmp"
+	elif [ "$NO_SYSTEM" = 1 ]; then
+		# Still validate the rendered drop-in so the admin snippet is known good.
+		visudo -cf "$tmp" >/dev/null 2>&1 || die "rendered sudoers failed validation"
+		rm -f "$tmp"
+		say "[no-system] skip $dest (see snippet below)"
 	else
 		se_install_sudoers "$tmp" "$dest" || die "failed to validate/install $dest"
 		rm -f "$tmp"
@@ -287,6 +378,15 @@ do_install() {
 		printf 'BASE_MINUTES=%s\n' "$BASE_MINUTES"
 		printf 'MAX_MINUTES=%s\n' "$MAX_MINUTES"
 		printf 'USERS=%s\n' "$(manifest_users)"
+		printf 'INSTALL_MODE=%s\n' "$([ "$USER_INSTALL" = 1 ] && printf user || printf system)"
+		printf 'SYSTEM=%s\n' "$([ "$NO_SYSTEM" = 1 ] && printf 0 || printf 1)"
+		printf 'SUDO_CONF_BAK=%s\n' "$SE_NEW_BAK"
+		if [ "$USER_INSTALL" = 1 ]; then
+			printf 'BINDIR=%s\n' "$SE_BIN_DIR"
+			printf 'LIBEXECDIR=%s\n' "$SE_LIBEXEC"
+			printf 'SHAREDIR=%s\n' "$SE_SHARE"
+			printf 'CONFIG=%s\n' "$SE_CONFIG"
+		fi
 		if [ "$DO_SKILL" = 1 ]; then
 			printf 'SKILL_DIR=%s\n' "${SKILL_DIR:-$(se_home_of "$TARGET_USER")/.config/opencode/skill/sudo-elevation}"
 		fi
@@ -295,10 +395,16 @@ do_install() {
 	rm -f "$tmp"
 
 	install_skill
+	write_receipt
+	chown_user_payload
 
-	if [ "$DRY" != 1 ] && [ "$(id -u)" = 0 ] && [ -z "$SE_PREFIX" ]; then
+	if [ "$DRY" != 1 ] && [ "$NO_SYSTEM" != 1 ] && [ "$(id -u)" = 0 ] && [ -z "$SE_PREFIX" ]; then
 		visudo -c >/dev/null || die "sudoers validation failed"
 		sudo -V >/dev/null 2>&1 || die "sudo.conf could not be parsed"
+	fi
+
+	if [ "$NO_SYSTEM" = 1 ]; then
+		print_system_snippet
 	fi
 
 	say ""
@@ -307,18 +413,117 @@ do_install() {
 	say "  sudo-elevation status"
 }
 
+# User-install receipt: lets the installed CLI resolve user paths without
+# exports (explicit env still wins). Paths only, no secrets.
+write_receipt() {
+	[ "$USER_INSTALL" = 1 ] || return 0
+	[ "$DO_SKILL" = 1 ] || true
+	local home conf_home dir target tmp
+	home=$(se_home_of "$TARGET_USER")
+	[ -n "$home" ] || return 0
+	if [ "$(id -un)" = "$TARGET_USER" ]; then
+		conf_home=${XDG_CONFIG_HOME:-$home/.config}
+	else
+		conf_home=$home/.config
+	fi
+	dir="$conf_home/sudo-elevation"
+	target="$dir/env"
+	if [ "$DRY" = 1 ]; then
+		say "[dry-run] install receipt -> $target"
+		return 0
+	fi
+	tmp=$(mktemp)
+	{
+		printf '# Managed by sudo-elevation install.sh --user-install.\n'
+		printf 'SUDO_ELEVATION_BINDIR=%s\n' "$SE_BIN_DIR"
+		printf 'SUDO_ELEVATION_LIBEXECDIR=%s\n' "$SE_LIBEXEC"
+		printf 'SUDO_ELEVATION_SHAREDIR=%s\n' "$SE_SHARE"
+		printf 'SUDO_ELEVATION_CONFIG=%s\n' "$SE_CONFIG"
+	} > "$tmp"
+	mk_dir "$dir"
+	run se_install_file "$tmp" "$target" 0644
+	rm -f "$tmp"
+	if [ "$(id -u)" = 0 ]; then
+		chown "$TARGET_USER" "$target" 2>/dev/null || true
+		chown "$TARGET_USER" "$dir" 2>/dev/null || true
+	fi
+	say "installed receipt: $target"
+}
+
+# In user mode the payload belongs to the target user even when root runs
+# the installer (se_install_file would otherwise chown root). Only our own
+# files are touched: never chown -R a shared dir like ~/.local/bin.
+chown_user_payload() {
+	[ "$USER_INSTALL" = 1 ] || return 0
+	[ "$(id -u)" = 0 ] || return 0
+	[ "$DRY" = 1 ] && return 0
+	chown "$TARGET_USER" "$SE_BIN_DIR/sudo-askpass" "$SE_BIN_DIR/sudo-elevation" 2>/dev/null || true
+	chown -R "$TARGET_USER" "$SE_LIBEXEC" "$SE_SHARE" 2>/dev/null || true
+	chown "$TARGET_USER" "$SE_CONFIG" 2>/dev/null || true
+}
+
+# Our own sudo.conf backup names: bak.YYYYMMDDHHMMSS[.PID]. Used to tell
+# our backups apart from an admin's own files (never delete those).
+se_own_backup() {
+	local base=${1##*/}
+	case "$base" in
+		sudo.conf.bak.*) ;;
+		*) return 1 ;;
+	esac
+	base=${base#sudo.conf.bak.}
+	printf '%s' "$base" | grep -Eq '^[0-9]{14}(\.[0-9]+)?$'
+}
+
+# Warn when the manifest's recorded layout disagrees with the requested one
+# (e.g. XDG drift between install and uninstall). Advisory only.
+check_manifest_layout() {
+	[ "$USER_INSTALL" = 1 ] || return 0
+	[ -f "$SE_SHARE/manifest" ] || return 0
+	local k want got
+	for k in BINDIR LIBEXECDIR SHAREDIR CONFIG; do
+		want=$(se_read_kv "$SE_SHARE/manifest" "$k" || true)
+		[ -n "$want" ] || continue
+		case "$k" in
+			BINDIR) got=$SE_BIN_DIR ;;
+			LIBEXECDIR) got=$SE_LIBEXEC ;;
+			SHAREDIR) got=$SE_SHARE ;;
+			CONFIG) got=$SE_CONFIG ;;
+		esac
+		if [ "$want" != "$got" ]; then
+			say "warning: manifest $k=$want differs from requested $got; using requested" >&2
+		fi
+	done
+}
+
 do_uninstall() {
-	local users u arr lease mech pid home sk tmp skdir
+	local users u arr lease mech pid home sk tmp skdir bak dest _bak _bpath _ghost _lease _ui_home _ui_conf
 	users=""
 	skdir=""
+	bak=""
+	se_load_config
 	if [ -f "$SE_SHARE/manifest" ]; then
 		users=$(se_read_kv "$SE_SHARE/manifest" USERS || true)
 		skdir=$(se_read_kv "$SE_SHARE/manifest" SKILL_DIR || true)
+		bak=$(se_read_kv "$SE_SHARE/manifest" SUDO_CONF_BAK || true)
+		check_manifest_layout
 	fi
 	[ -n "$SKILL_DIR" ] && skdir=$SKILL_DIR
 	[ -n "$users" ] || users=$TARGET_USER
 	IFS=',' read -r -a arr <<< "$users,$TARGET_USER"
+	# --no-system never touches /etc or /run (unprivileged): user payload
+	# only, plus a manual snippet for the admin at the end.
+	SYS_OK=1
+	[ "$NO_SYSTEM" = 1 ] && SYS_OK=0
 
+	if [ "$PURGE" = 1 ]; then
+		say "uninstall --purge: removing config and ALL sudo-elevation data (no mercy)"
+	else
+		say "uninstall: removing software, keeping config (add --purge to delete everything)"
+	fi
+
+	# Phase 1 (both modes): end leases and pin every managed sudoers file to
+	# the base window FIRST, while helpers still exist. Deleting a lease file
+	# without restoring would strand sudoers at the lease timeout forever.
 	for u in "${arr[@]}"; do
 		[ -n "$u" ] || continue
 		se_valid_user "$u" || continue
@@ -330,15 +535,67 @@ do_uninstall() {
 			pid=${pid%%:*}
 			case "$pid" in
 				''|*[!0-9]*) ;;
+				# NOTE: only setsid sleepers are tracked. systemd transient
+				# timers are not cancelled here; they self-exit (no lease ->
+				# restore prints nothing-to-do without touching sudoers).
 				*) if kill -0 "$pid" 2>/dev/null; then run kill "$pid" || true; fi ;;
 			esac
-			run rm -f "$lease"
 		fi
-		run rm -f "$SE_SUDOERS_DIR/90-sudo-elevation-$(se_user_slug "$u")"
+		dest="$SE_SUDOERS_DIR/90-sudo-elevation-$(se_user_slug "$u")"
+		if [ "$DRY" = 1 ]; then
+			say "[dry-run] restore base sudoers for $u + clear cache"
+		elif [ "$SYS_OK" != 1 ]; then
+			say "[no-system] skip lease/sudoers for $u (admin snippet below)"
+		elif [ -x "$SE_LIBEXEC/restore" ] && "$SE_LIBEXEC/restore" --user "$u" --force >/dev/null 2>&1; then
+			: # restore cleared cache, pinned base, removed the lease
+		else
+			# Fallback (non-root sandbox, missing helper): pin base directly.
+			tmp=$(mktemp)
+			se_render_sudoers "$u" "$BASE_MINUTES" "$tmp"
+			if [ "$(id -u)" = 0 ] && [ -z "$SE_PREFIX" ]; then
+				se_install_sudoers "$tmp" "$dest" || true
+			else
+				se_install_sudoers "$tmp" "$dest" >/dev/null 2>&1 || true
+			fi
+			rm -f "$tmp" "$lease" 2>/dev/null || true
+		fi
 
 		if [ "$DRY" != 1 ] && [ "$(id -u)" = 0 ] && [ -z "$SE_PREFIX" ] \
+		   && [ "$NO_SYSTEM" != 1 ] \
 		   && command -v runuser >/dev/null 2>&1; then
 			runuser -u "$u" -- sudo -k >/dev/null 2>&1 || true
+		fi
+	done
+
+	# Phase 2 (both modes): remove software payload.
+	run rm -f "$SE_BIN_DIR/sudo-askpass" "$SE_BIN_DIR/sudo-elevation"
+	run rm -f "$SE_LIBEXEC/common.sh" "$SE_LIBEXEC/grant" "$SE_LIBEXEC/restore" "$SE_LIBEXEC/install.sh"
+	run rmdir "$SE_LIBEXEC" 2>/dev/null || true
+	run rm -f "$SE_SHARE/VERSION" "$SE_SHARE/LICENSE"
+	if [ "$PURGE" = 1 ]; then
+		run rm -f "$SE_SHARE/manifest"
+	fi
+	run rmdir "$SE_SHARE" 2>/dev/null || true
+	if [ "$PURGE" = 1 ]; then
+		# Tidy parents created for user installs (only empty dirs go).
+		run rmdir "$(dirname "$SE_LIBEXEC")" 2>/dev/null || true
+		run rmdir "$(dirname "$SE_SHARE")" 2>/dev/null || true
+	fi
+
+	if [ "$PURGE" != 1 ]; then
+		say "sudo-elevation: 软件已卸载，配置保留（sudoers 基窗/marker/配置/manifest/skill/审计）"
+		say "sudo-elevation: 需要删干净时用 --purge；sudo -A 在重装前不可用（askpass 已删），普通 sudo 不受影响"
+		[ "$SYS_OK" = 1 ] || print_uninstall_snippet
+		return 0
+	fi
+
+	# Phase 3 (purge only): delete config and every sudo-elevation trace,
+	# including users missing from the manifest (suspect data included).
+	for u in "${arr[@]}"; do
+		[ -n "$u" ] || continue
+		se_valid_user "$u" || continue
+		if [ "$SYS_OK" = 1 ]; then
+			run rm -f "$SE_SUDOERS_DIR/90-sudo-elevation-$(se_user_slug "$u")"
 		fi
 
 		home=$(se_home_of "$u")
@@ -353,8 +610,29 @@ do_uninstall() {
 			run rmdir "$sk" 2>/dev/null || true
 		fi
 	done
+	# Ghost sweep: drop-ins for users the manifest never knew.
+	if [ "$SYS_OK" = 1 ]; then
+		for _ghost in "$SE_SUDOERS_DIR"/90-sudo-elevation-*; do
+			[ -e "$_ghost" ] || continue
+			run rm -f "$_ghost"
+		done
+	fi
+	# Ghost sweep: leases (kill tracked sleepers first).
+	if [ "$SYS_OK" = 1 ]; then
+		for _lease in "$SE_RUNTIME_DIR"/*.lease; do
+			[ -f "$_lease" ] || continue
+			mech=$(se_read_kv "$_lease" restore || true)
+			pid=${mech##*pid=}
+			pid=${pid%%:*}
+			case "$pid" in
+				''|*[!0-9]*) ;;
+				*) if kill -0 "$pid" 2>/dev/null; then run kill "$pid" || true; fi ;;
+			esac
+			run rm -f "$_lease"
+		done
+	fi
 
-	if [ -f "$SE_SUDO_CONF" ] && grep -q '^# >>> sudo-elevation >>>' "$SE_SUDO_CONF"; then
+	if [ "$SYS_OK" = 1 ] && [ -f "$SE_SUDO_CONF" ] && grep -q '^# >>> sudo-elevation >>>' "$SE_SUDO_CONF"; then
 		if [ "$DRY" = 1 ]; then
 			say "[dry-run] remove marker block from $SE_SUDO_CONF"
 		else
@@ -365,25 +643,73 @@ do_uninstall() {
 		fi
 	fi
 
-	run rm -f "$SE_BIN_DIR/sudo-askpass" "$SE_BIN_DIR/sudo-elevation"
-	run rm -f "$SE_LIBEXEC/common.sh" "$SE_LIBEXEC/grant" "$SE_LIBEXEC/restore" "$SE_LIBEXEC/install.sh"
-	run rmdir "$SE_LIBEXEC" 2>/dev/null || true
-	run rm -f "$SE_SHARE/VERSION" "$SE_SHARE/LICENSE" "$SE_SHARE/manifest"
-	run rmdir "$SE_SHARE" 2>/dev/null || true
 	run rm -f "$SE_CONFIG"
-	# Expand explicitly so dry-run never touches the filesystem.
-	for _bak in "$SE_SUDO_CONF".bak.*; do
-		[ -e "$_bak" ] || continue
-		run rm -f "$_bak"
-	done
-	run rmdir "$SE_RUNTIME_DIR" 2>/dev/null || true
-	[ "$PURGE" = 1 ] && run rm -f "$SE_LOG"
+	# Backups live next to the system sudo.conf: purge-only and SYS_OK-only.
+	# The manifest-recorded basename always; legacy ones only when they
+	# match our own strict name shape (an admin's bak.* files are kept).
+	if [ "$SYS_OK" != 1 ]; then
+		say "[no-system] skip sudo.conf backups (admin snippet below)"
+	fi
+	if [ "$SYS_OK" = 1 ] && [ -n "$bak" ]; then
+		case "$bak" in
+			*/*) say "warning: odd recorded backup name, skipping: $bak" >&2 ;;
+			*)
+				_bpath="${SE_SUDO_CONF%/*}/$bak"
+				if se_own_backup "$_bpath"; then
+					run rm -f "$_bpath"
+				else
+					say "warning: odd recorded backup name, skipping: $bak" >&2
+				fi
+				;;
+		esac
+	fi
+	if [ "$SYS_OK" = 1 ]; then
+		for _bak in "$SE_SUDO_CONF".bak.*; do
+			[ -e "$_bak" ] || continue
+			se_own_backup "$_bak" || continue
+			run rm -f "$_bak"
+		done
+	fi
+	# User-install receipt belongs to the install and goes with purge.
+	if [ "$USER_INSTALL" = 1 ]; then
+		_ui_home=$(se_home_of "$TARGET_USER")
+		if [ -n "$_ui_home" ]; then
+			if [ "$(id -un)" = "$TARGET_USER" ]; then
+				_ui_conf=${XDG_CONFIG_HOME:-$_ui_home/.config}
+			else
+				_ui_conf=$_ui_home/.config
+			fi
+			run rm -f "$_ui_conf/sudo-elevation/env"
+			run rmdir "$_ui_conf/sudo-elevation" 2>/dev/null || true
+		fi
+	fi
+	if [ "$SYS_OK" = 1 ]; then
+		run rmdir "$SE_RUNTIME_DIR" 2>/dev/null || true
+		run rm -f "$SE_LOG"
+	fi
 
-	if [ "$DRY" != 1 ] && [ "$(id -u)" = 0 ] && [ -z "$SE_PREFIX" ]; then
+	if [ "$DRY" != 1 ] && [ "$SYS_OK" = 1 ] && [ "$(id -u)" = 0 ] && [ -z "$SE_PREFIX" ]; then
 		visudo -c >/dev/null || die "sudoers validation failed after uninstall"
 		sudo -V >/dev/null 2>&1 || die "sudo.conf could not be parsed after uninstall"
 	fi
+	if [ "$SYS_OK" != 1 ]; then
+		print_uninstall_snippet
+	fi
 	say "sudo-elevation: 卸载完成"
+}
+
+# Manual snippet for --no-system uninstall: system files the admin removes.
+print_uninstall_snippet() {
+	local u
+	say ""
+	say "--no-system: system files were NOT touched. Ask an admin to remove:"
+	for u in "${arr[@]}"; do
+		[ -n "$u" ] || continue
+		se_valid_user "$u" || continue
+		say "  rm -f $SE_SUDOERS_DIR/90-sudo-elevation-$(se_user_slug "$u")"
+	done
+	say "  (strip the '# >>> sudo-elevation >>>' block from $SE_SUDO_CONF)"
+	say "  rm -f $SE_RUNTIME_DIR/*.lease   # then rmdir it; also: sudo -k per user"
 }
 
 BASE_MINUTES=$(se_parse_minutes "$BASE_SPEC") || die "invalid --base-timeout: $BASE_SPEC"

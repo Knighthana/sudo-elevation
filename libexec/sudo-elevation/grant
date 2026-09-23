@@ -15,6 +15,8 @@ SELF_DIR=$(cd "$(dirname "$0")" && pwd)
 usage() {
 	echo "usage: grant --user USER (--minutes N | --choice-file FILE)" >&2
 	echo "       [--request-file FILE] [--reason TEXT] [--requested N]" >&2
+	echo "       [--config-file FILE]  (user-install: load timeouts from here;" >&2
+	echo "                              env does not survive the sudo boundary)" >&2
 }
 
 user=""
@@ -23,6 +25,7 @@ choice_file=""
 request_file=""
 reason=""
 requested=""
+config_file=""
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -32,6 +35,7 @@ while [ $# -gt 0 ]; do
 		--request-file) request_file=${2-}; shift 2 ;;
 		--reason) reason=${2-}; shift 2 ;;
 		--requested) requested=${2-}; shift 2 ;;
+		--config-file) config_file=${2-}; shift 2 ;;
 		-h|--help) usage; exit 0 ;;
 		*) echo "grant: unknown argument: $1" >&2; usage; exit 2 ;;
 	esac
@@ -42,6 +46,11 @@ done
 se_valid_user "$user" || { echo "grant: missing or invalid --user" >&2; exit 2; }
 id "$user" >/dev/null 2>&1 || { echo "grant: no such user: $user" >&2; exit 2; }
 
+if [ -n "$config_file" ]; then
+	[ -f "$config_file" ] || { echo "grant: config file not found: $config_file" >&2; exit 2; }
+	# shellcheck disable=SC2034  # consumed by se_load_config below
+	SUDO_ELEVATION_CONFIG=$config_file
+fi
 se_load_config
 
 if [ -n "$choice_file" ]; then
@@ -84,7 +93,7 @@ now=$(date +%s)
 epoch="${now}-$$-${RANDOM}"
 restore_mech="none"
 if [ "$minutes" != "-1" ]; then
-	restore_mech=$(se_schedule_restore "$user" "$epoch" "$minutes") || restore_mech="failed"
+	restore_mech=$(se_schedule_restore "$user" "$epoch" "$minutes" "${config_file:-$SE_CONFIG}") || restore_mech="failed"
 fi
 
 se_write_lease "$(se_lease_file "$user")" "$user" \

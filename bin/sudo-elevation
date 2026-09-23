@@ -25,7 +25,7 @@ commands:
   grant   --for <duration> [--reason TEXT]   approve a lease from a terminal (headless)
   status [--porcelain]                       show active lease and base window
   lock                                       revoke sudo cache and restore base window
-  uninstall [--purge]                        remove sudo-elevation (--purge drops the audit log too)
+  uninstall [--purge]                        remove software but keep config (--purge deletes everything)
   parse <duration>                           print minutes for a duration spec
   version                                    print version
 
@@ -85,9 +85,9 @@ case "$cmd" in
 		#   - timestamp invalid -> `sudo -A`: prompts anyway; on success sudo
 		#                          refreshes the cache so `sudo -n` works right after.
 		if sudo -n true 2>/dev/null; then
-			sudo -k -A "$GRANT_BIN" --user "$ME" --choice-file "$choice_file" --request-file "$req_file" || rc=$?
+			sudo -k -A "$GRANT_BIN" --user "$ME" --choice-file "$choice_file" --request-file "$req_file" --config-file "$SE_CONFIG" || rc=$?
 		else
-			sudo -A "$GRANT_BIN" --user "$ME" --choice-file "$choice_file" --request-file "$req_file" || rc=$?
+			sudo -A "$GRANT_BIN" --user "$ME" --choice-file "$choice_file" --request-file "$req_file" --config-file "$SE_CONFIG" || rc=$?
 		fi
 		exit "$rc"
 		;;
@@ -104,7 +104,7 @@ case "$cmd" in
 		done
 		[ -n "$spec" ] || { echo "grant: --for is required (example: --for 1h)" >&2; exit 2; }
 		minutes=$(se_parse_minutes "$spec") || { echo "grant: bad duration: $spec (single value+unit: 90s/45m/2h/1d/bare-minutes/until-lock; 1m30s invalid, use 90s)" >&2; exit 2; }
-		args=(--user "$ME" --minutes "$minutes")
+		args=(--user "$ME" --minutes "$minutes" --config-file "$SE_CONFIG")
 		[ -n "$reason" ] && args+=(--reason "$(se_sanitize_reason "$reason")")
 		if [ -t 0 ] || [ -t 1 ]; then
 			exec sudo "$GRANT_BIN" "${args[@]}"
@@ -208,7 +208,7 @@ case "$cmd" in
 		se_load_config
 		restored=0
 		timed_out=0
-		if sudo -n "$RESTORE_BIN" --user "$ME" --force >/dev/null 2>&1; then
+		if sudo -n "$RESTORE_BIN" --user "$ME" --force --config-file "$SE_CONFIG" >/dev/null 2>&1; then
 			restored=1
 		elif [ -t 0 ] || [ -t 1 ]; then
 			# Interactive fallback: no cached timestamp (e.g. after a bare
@@ -217,7 +217,7 @@ case "$cmd" in
 			# unattended pty (no human behind it) fails fast instead of
 			# hanging on the password prompt: a hang costs more than an error.
 			# (case with no match returns 0, keeping this safe under set -e.)
-			if timeout 15 sudo "$RESTORE_BIN" --user "$ME" --force >/dev/null 2>&1; then
+			if timeout 15 sudo "$RESTORE_BIN" --user "$ME" --force --config-file "$SE_CONFIG" >/dev/null 2>&1; then
 				restored=1
 			else
 				case "$?" in 124) timed_out=1 ;; esac
@@ -258,12 +258,18 @@ EOF
 			echo "uninstall: $installer not found (install first, or run ./install.sh --uninstall from the repository)" >&2
 			exit 1
 		fi
+		# Re-apply the recorded install layout (user-install without exports).
+		mode=()
+		if [ -f "$SE_SHARE/manifest" ]; then
+			[ "$(se_read_kv "$SE_SHARE/manifest" INSTALL_MODE || true)" = user ] && mode+=(--user-install)
+			[ "$(se_read_kv "$SE_SHARE/manifest" SYSTEM || true)" = 0 ] && mode+=(--no-system)
+		fi
 		if [ -n "${SUDO_ELEVATION_PREFIX:-}" ]; then
 			exec "$installer" --prefix "$SUDO_ELEVATION_PREFIX" --uninstall ${purge[@]+"${purge[@]}"}
 		elif [ -t 0 ] || [ -t 1 ]; then
-			exec sudo "$installer" --uninstall ${purge[@]+"${purge[@]}"}
+			exec sudo "$installer" --uninstall ${mode[@]+"${mode[@]}"} ${purge[@]+"${purge[@]}"}
 		else
-			exec sudo -A "$installer" --uninstall ${purge[@]+"${purge[@]}"}
+			exec sudo -A "$installer" --uninstall ${mode[@]+"${mode[@]}"} ${purge[@]+"${purge[@]}"}
 		fi
 		;;
 	parse)

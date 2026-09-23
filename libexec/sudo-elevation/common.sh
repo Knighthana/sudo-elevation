@@ -8,20 +8,57 @@
 # SUDO_ELEVATION_PREFIX may be set to relocate every system path (used by
 # the test-suite to run the installer inside a sandbox).
 #
+# Per-directory overrides (used by --user-install; explicit env wins):
+#   SUDO_ELEVATION_BINDIR / LIBEXECDIR / SHAREDIR / CONFIG (file) /
+#   SUDO_CONF / SUDOERS_DIR / RUNTIME_DIR / LOG
+# When none are set, a user-install receipt at
+# ${XDG_CONFIG_HOME:-$HOME/.config}/sudo-elevation/env (written by the
+# installer) is picked up automatically. Only whitelisted keys with a safe
+# charset are accepted; never eval'd.
+#
 # shellcheck disable=SC2034  # SE_*/config vars are consumed by sourcing scripts
 
 SE_PREFIX="${SUDO_ELEVATION_PREFIX:-}"
 
 se_path() { printf '%s%s' "$SE_PREFIX" "$1"; }
 
-SE_BIN_DIR="$(se_path /usr/local/bin)"
-SE_LIBEXEC="$(se_path /usr/local/libexec/sudo-elevation)"
-SE_SHARE="$(se_path /usr/local/share/sudo-elevation)"
-SE_CONFIG="$(se_path /etc/sudo-elevation.conf)"
-SE_SUDO_CONF="$(se_path /etc/sudo.conf)"
-SE_SUDOERS_DIR="$(se_path /etc/sudoers.d)"
-SE_RUNTIME_DIR="$(se_path /run/sudo-elevation)"
-SE_LOG="$(se_path /var/log/sudo-elevation.log)"
+se_load_receipt() {
+	# $1 = probing flag: when 1, missing receipt is fine (normal case).
+	local receipt conf_home line key val
+	conf_home=${XDG_CONFIG_HOME:-$HOME/.config} 2>/dev/null || return 0
+	receipt="$conf_home/sudo-elevation/env"
+	[ -f "$receipt" ] || return 0
+	while IFS= read -r line || [ -n "$line" ]; do
+		case "$line" in ''|'#'*) continue ;; esac
+		case "$line" in *=*) ;; *) continue ;; esac
+		key=${line%%=*}
+		val=${line#*=}
+		case "$key" in
+			SUDO_ELEVATION_BINDIR|SUDO_ELEVATION_LIBEXECDIR|SUDO_ELEVATION_SHAREDIR|\
+			SUDO_ELEVATION_CONFIG|SUDO_ELEVATION_SUDO_CONF|SUDO_ELEVATION_SUDOERS_DIR|\
+			SUDO_ELEVATION_RUNTIME_DIR|SUDO_ELEVATION_LOG) ;;
+			*) continue ;;
+		esac
+		# Absolute paths only; spaces allowed ($HOME may contain them), but
+		# shell-active chars are rejected: values are interpolated inside
+		# double quotes (se_schedule_restore) and must stay inert.
+		case "$val" in /*) ;; *) continue ;; esac
+		case "$val" in *'"'*|*'`'*|*'$'*|*'\'*) continue ;; esac
+		# shellcheck disable=SC2086  # intentional indirect assignment
+		[ -n "${!key:-}" ] || printf -v "$key" '%s' "$val"
+	done < "$receipt"
+}
+
+se_load_receipt
+
+SE_BIN_DIR="${SUDO_ELEVATION_BINDIR:-$(se_path /usr/local/bin)}"
+SE_LIBEXEC="${SUDO_ELEVATION_LIBEXECDIR:-$(se_path /usr/local/libexec/sudo-elevation)}"
+SE_SHARE="${SUDO_ELEVATION_SHAREDIR:-$(se_path /usr/local/share/sudo-elevation)}"
+SE_CONFIG="${SUDO_ELEVATION_CONFIG:-$(se_path /etc/sudo-elevation.conf)}"
+SE_SUDO_CONF="${SUDO_ELEVATION_SUDO_CONF:-$(se_path /etc/sudo.conf)}"
+SE_SUDOERS_DIR="${SUDO_ELEVATION_SUDOERS_DIR:-$(se_path /etc/sudoers.d)}"
+SE_RUNTIME_DIR="${SUDO_ELEVATION_RUNTIME_DIR:-$(se_path /run/sudo-elevation)}"
+SE_LOG="${SUDO_ELEVATION_LOG:-$(se_path /var/log/sudo-elevation.log)}"
 
 SE_VERSION="$(cat "$SE_SHARE/VERSION" 2>/dev/null || printf 'dev')"
 
@@ -260,21 +297,25 @@ se_parent_cmd() {
 
 # Best-effort restore scheduling. Echoes the mechanism used.
 # systemd systems use a transient timer; otherwise a detached root sleeper.
-se_schedule_restore() { # user epoch minutes
-	local user=$1 epoch=$2 minutes=$3 secs
+# $4 (optional) is the config file the scheduled restore must load: root-side
+# helpers cannot see the user's env/receipt, so the caller passes the resolved
+# path explicitly (user-install correctness).
+se_schedule_restore() { # user epoch minutes [config]
+	local user=$1 epoch=$2 minutes=$3 cfg=${4:-$SE_CONFIG} secs
 	[ "$minutes" = "-1" ] && { printf 'none'; return 0; }
 	secs=$(awk -v m="$minutes" 'BEGIN{printf "%d", (m*60)+0.5}')
 	if [ -z "$SE_PREFIX" ] && [ -d /run/systemd/system ] && command -v systemd-run >/dev/null 2>&1 \
 	   && systemctl is-system-running >/dev/null 2>&1; then
 		if systemd-run --collect --quiet --on-active="${secs}s" \
 			--unit="sudo-elevation-${user}-${epoch}" \
-			"$SE_LIBEXEC/restore" --user "$user" --epoch "$epoch" >/dev/null 2>&1; then
+			"$SE_LIBEXEC/restore" --user "$user" --epoch "$epoch" \
+			--config-file "$cfg" >/dev/null 2>&1; then
 			printf 'systemd-run:%.0fs' "$secs"
 			return 0
 		fi
 	fi
 	if command -v setsid >/dev/null 2>&1; then
-		setsid sh -c "sleep $secs; exec \"$SE_LIBEXEC/restore\" --user \"$user\" --epoch \"$epoch\"" \
+		setsid sh -c "sleep $secs; exec \"$SE_LIBEXEC/restore\" --user \"$user\" --epoch \"$epoch\" --config-file \"$cfg\"" \
 			</dev/null >/dev/null 2>&1 &
 		printf 'setsid:pid=%s:%.0fs' "$!" "$secs"
 		return 0

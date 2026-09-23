@@ -152,18 +152,36 @@ shellcheck + host 沙箱 + Docker 矩阵。
 - ⏳ 仍待手测：kdialog 真实弹窗（需 KDE 环境）、`systemd-run` 恢复分支
   （本机 PID1 为 WSL `init`，走 `setsid`；需启用 systemd 的 Ubuntu 桌面）、
   `GUI_BACKEND=wayland` 覆盖。
+- ⏳ `lock` tty 回退真机半自动：`tests/manual/lock-tty.sh check` 只读预检；
+  空闲时 `--yes timeout-only`（全自动约 40s）或有 tty `--yes all`（输 1 次口令约 1min）。不进 CI。
 
-## 卸载
+## 用户目录安装（XDG）
 
 ```bash
-sudo-elevation uninstall              # 无需仓库；--purge 连审计日志一起删
-# 或在仓库目录: sudo ./install.sh --uninstall [--purge]
+sudo ./install.sh --user-install --user alice     # payload 进 ~/.local，配置进 ~/.config
+./install.sh --user-install --no-system           # 免 root 降级安装（仅用户文件，见下）
 ```
 
-卸载会：终止进行中的恢复任务并撤销租约、按 manifest 清理**所有**曾安装用户的
-sudoers/skill、从 `sudo.conf` 只摘除标记块（外来内容原样保留）、删除全部安装文件
-（含 `sudo.conf.bak.*` 备份与 `/run/sudo-elevation`），最后 `visudo -c` 自检；
-审计日志默认保留，`--purge` 才删除。
+- 布局：可执行文件 `~/.local/bin`、libexec `~/.local/libexec`、数据 `~/.local/share`、
+  配置 `~/.config/sudo-elevation/config`、skill 照常、`~/.config/sudo-elevation/env` 记录路径。
+- CLI 靠该 receipt 自动定位，无需 export；root 侧 helper 由 CLI 显式传递 `--config-file`。
+- sudoers drop-in 与 `sudo.conf` marker 仍是系统文件：要么 root 装，要么 `--no-system`
+  跳过并打印管理员 snippet（未应用前工具 inert）。root 代装时 payload 属主归目标用户。
+- 卸载同样加 `--user-install`（CLI `uninstall` 按 manifest 自动转发）。
+
+## 卸载（包管理器式两档）
+
+```bash
+sudo-elevation uninstall              # 卸软件留配置：租约先落回基窗，sudoers 基窗/marker/配置/manifest/skill/审计保留
+sudo-elevation uninstall --purge      # 删干净：配置全删，manifest 外的 90-sudo-elevation-* 与 *.lease 一并清除
+# 或在仓库目录: sudo ./install.sh --uninstall [--purge]（用户安装加 --user-install）
+```
+
+- 默认档结束所有活动租约（sudoers 回基窗、清缓存）后再删程序；`sudo -A` 在重装前不可用
+  （askpass 已删），普通 sudo 不受影响。
+- `--purge` 不保留任何旧数据（怀疑旧数据有害时用）：自建 `sudo.conf` 备份按 manifest 精确删除，
+  旧版残留备份只删严格自有格式（`bak.YYYYMMDDHHMMSS[.PID]`），管理员自有备份保留。
+- `--no-system` 装/卸只动用户文件，系统部分打印 snippet 请管理员动手。
 
 ## 故障排查
 

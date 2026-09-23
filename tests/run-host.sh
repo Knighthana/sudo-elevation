@@ -153,8 +153,34 @@ touch "$SB/root/etc/sudo.conf.bak.20990101000000"
 rm -f "$SB/root/etc/sudo.conf.bak.20990101000000"
 ok "uninstall dry-run clean"
 
-log "uninstall via CLI subcommand (prefix sandbox, no sudo needed)"
+log "user-install --dry-run resolves XDG layout without touching home"
+UH=$(getent passwd "$ME" | cut -d: -f6)
+[ -n "$UH" ] || die "no home for $ME"
+[ ! -e "$UH/.local/bin/sudo-elevation" ] || die "pre-existing user install, abort"
+out=$("$REPO/install.sh" --user-install --no-system --dry-run 2>&1)
+grep -qF "$UH/.local/bin" <<<"$out" || die "no user bindir: $out"
+grep -qF -- "--no-system" <<<"$out" || die "no-system note missing: $out"
+[ ! -e "$UH/.local/bin/sudo-elevation" ] || die "dry-run wrote home"
+[ ! -e "$UH/.config/sudo-elevation/env" ] || die "dry-run wrote receipt"
+ok "user dry-run clean"
+
+log "keep uninstall via CLI (prefix sandbox, no sudo needed)"
 "$SE" uninstall >/dev/null
+for f in usr/local/bin/sudo-askpass usr/local/bin/sudo-elevation \
+	usr/local/libexec/sudo-elevation/grant usr/local/libexec/sudo-elevation/install.sh \
+	usr/local/libexec/sudo-elevation/restore; do
+	[ ! -e "$SB/root/$f" ] || die "leftover $f"
+done
+for f in etc/sudo-elevation.conf etc/sudoers.d/90-sudo-elevation-"$ME" \
+	usr/local/share/sudo-elevation/manifest; do
+	[ -f "$SB/root/$f" ] || die "config should be kept: $f"
+done
+[ -f "$SB/skill/SKILL.md" ] || die "skill should be kept"
+grep -q 'sudo-elevation' "$SB/root/etc/sudo.conf" || die "marker should be kept"
+ok "keep: payload gone, config kept"
+
+log "purge uninstall removes everything"
+"$REPO/install.sh" --prefix "$SB/root" --user "$ME" --skill-dir "$SB/skill" --uninstall --purge >/dev/null
 for f in usr/local/bin/sudo-askpass usr/local/bin/sudo-elevation \
 	usr/local/libexec/sudo-elevation/grant usr/local/libexec/sudo-elevation/install.sh \
 	usr/local/libexec/sudo-elevation/restore etc/sudo-elevation.conf \
@@ -165,6 +191,6 @@ done
 if [ -f "$SB/root/etc/sudo.conf" ]; then
 	! grep -q 'sudo-elevation' "$SB/root/etc/sudo.conf" || die "leftover sudo.conf block"
 fi
-ok "uninstall clean"
+ok "purge clean"
 
 printf '\nHOST TESTS PASSED\n'

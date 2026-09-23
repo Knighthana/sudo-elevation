@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.6 - 2026-09-24
+
+- feat: XDG 用户目录安装（`--user-install`）：payload 进 `~/.local`、配置进 `~/.config`，
+  `env` receipt 自举（显式 env 优先，严格白名单、无 eval）；root 代装 payload 属主归用户；
+  `grant`/`restore` 新增 `--config-file`（env 过不了 sudo 边界，CLI 显式透传，定时任务携带）；
+  `--no-system` 降级安装/卸载（跳系统文件并打印管理员 snippet）。
+- feat: 包管理器式卸载——默认卸软件留配置（租约先落回基窗再删程序，`sudo -A` 在重装前不可用，
+  普通 sudo 不受影响）；`--purge` 删干净（含 manifest 外的 ghost sudoers/lease）。
+- fix: `sudo.conf` 备份精确删除（manifest 记录自建名；旧版残留只删严格自有格式，管理员备份保留）。
+- fix: 重装/卸载不再把租约卡在半空（phase 1 先 restore 到基窗）；systemd transient 注释说明。
+- docs: 卸载双模式 + 用户安装章节；CLI `uninstall` 按 manifest 自动转发安装模式。
+- tests: `06_uninstall` 拆 keep/purge（含 ghost 与备份精度）；新增 `16_user_install`
+  （布局/属主/receipt/真实租约/CLI 转发/keep/purge）；host 增 user dry-run 与 keep/purge 断言。
+
 ## 0.1.5 - 2026-09-24
 
 - fix: `lock` tty 回退包 `timeout 15`——无人的 pty 不再挂在口令提示上，15s 超时即报错走人
