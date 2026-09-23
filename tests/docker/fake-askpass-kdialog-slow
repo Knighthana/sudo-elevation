@@ -1,0 +1,10 @@
+#!/bin/sh
+# Test-only SUDO_ASKPASS wrapper that drives the kdialog code path with a
+# hanging PATH stub instead of a real KDE dialog. Hang length comes from
+# /tmp/se-slow-sleep (file-based: env does not survive the sudo boundary).
+# Never installed by install.sh.
+export SUDO_ELEVATION_UI=kdialog
+export PATH="/src/tests/docker/stubs-slow:${PATH:-/usr/bin:/bin}"
+SE_SLOW_SLEEP="$(cat /tmp/se-slow-sleep 2>/dev/null || echo 30)"
+export SE_SLOW_SLEEP
+exec /usr/local/bin/sudo-askpass "$@"

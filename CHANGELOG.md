@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.5 - 2026-09-24
+
+- fix: `lock` tty 回退包 `timeout 15`——无人的 pty 不再挂在口令提示上，15s 超时即报错走人
+  （认证超时有专属提示）；`lock -1` 报错中的 `$USER` 改为真实用户名展开。
+- fix: kdialog 超时——kdialog 原生无 `--timeout`，改由 shell 层 `timeout(1)` 按 `DIALOG_TIMEOUT`
+  强制（与 zenity 对齐，fail-closed）；`DIALOG_TIMEOUT=0` 表不限制。
+- change: 非法时长显示按 0 处理（立即过期失败），中英人文案 `未知/unknown` 改为 `0 秒/0 seconds`；
+  duration 严格定义为单值单单位，`1m30s` 复合直接报错并给换算提示。
+- hardening: `grant requested` 回退校验收紧（与配置同形）。
+- docs: reason 双阈值（建议 60 字/硬截断 200）；SKILL 离场预案（无人响应停手汇总）；
+  README“何时可以离开”+ KDE 正告（stub 测试、无真机）+ 重装前 `lock` 建议；porcelain 首 `=` 切分约定。
+- docs: 9 月 Demand/Code 三份评审报告归档至 `docs/archive/`（精神均已合入）。
+- tests: `15_extra` 增复合时长/非法租约/reason 81-201 字/kdialog 慢 stub 超时/重装自愈；
+  host 增 skill 60 字+离场规则/1m30s 断言；CI 覆盖新增 stub/wrapper。
+
 ## 0.1.4 - 2026-09-24
 
 - P1: `lock` 在无有效 timestamp 时不再假装成功——`until-lock`（`-1`）残留则非零退出并指引

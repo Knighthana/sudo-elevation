@@ -27,6 +27,7 @@ jobs:
             tests/docker/run.sh tests/docker/lib.sh \
             tests/docker/fake-askpass tests/docker/fake-askpass-print \
             tests/docker/fake-askpass-kdialog tests/docker/stubs/kdialog \
+            tests/docker/fake-askpass-kdialog-slow tests/docker/stubs-slow/kdialog \
             tests/docker/scenarios/*.sh
 
       - name: Host sandbox tests

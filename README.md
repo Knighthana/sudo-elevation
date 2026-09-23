@@ -62,6 +62,8 @@ sudo ./install.sh                 # 默认用户 $SUDO_USER，基础窗口 15m
 `timestamp_type`，更早版本会明确报错拒绝安装）、`awk`/`grep`/`coreutils`/`util-linux`；
 图形弹窗需要 `zenity`（GNOME/Mint）或 `kdialog`（KDE 自动降级），**两者皆无时安装仅警告并继续**
 （`request` 不可用，改用终端 `grant` 审批）；WSL2 需要 WSLg。
+> **KDE 用户注意**：kdialog 分支仅做过参数 stub 测试，无 KDE 真机验证；弹窗超时由 `timeout(1)`
+> 按 `DIALOG_TIMEOUT` 强制（与 zenity 对齐），渲染效果未经眼看，长时间无响应请直接关闭窗口或改用终端 `grant`。
 
 ## 使用
 
@@ -83,10 +85,11 @@ sudo-elevation status
 sudo-elevation lock
 ```
 
-时长格式：`90s` / `45m` / `2h` / `1d`，裸数字=分钟，`until-lock`=直到手动撤销。
+时长格式（单值单单位）：`90s` / `45m` / `2h` / `1d`，裸数字=分钟，`until-lock`=直到手动撤销；
+不支持 `1m30s` 这类复合写法（请换算，如 `90s`），无法解析的时长会直接报错失败。
 弹窗分两步，zenity 与 kdialog 均为**同窗 radio 单选**：先在单选列表里选时长
 （agent 请求值默认选中，含“手动输入…”与“仅本次”），再输密码；密码框内**回车即提交**
-（选时长窗点“继续”）。
+（选时长窗点“继续”）。kdialog 无真机验证（见上），超时同样按 `DIALOG_TIMEOUT` 强制关闭。
 
 ## 行为细节
 
@@ -97,6 +100,10 @@ sudo-elevation lock
 - **裸 `sudo -A`**（不走 request）：简单密码弹窗，按基础窗口授权。
 - **审计**：`/var/log/sudo-elevation.log` 只记录租约的 grant/restore（请求者/原因/请求与批准时长/恢复方式），
   窗口内实际执行的 sudo 命令不在本项目审计范围，如需溯源请另配 sudo `log_input`/`log_output`。
+- **原因长度**：`--reason` 建议 60 字以内（弹窗可读），超 200 字必截断并告警。
+- **何时可以离开**：`request` 批准成功即可离开（唯一阻塞点≤5 分钟）；`lock` 成功即可离开；
+  `lock` 报错失败必须留下处理，`until-lock` 尤其如此。
+- **重装建议**：重装会重置 sudoers 到基础窗口，但活动租约的显示要等旧恢复任务自愈；重装前建议先 `lock`。
 - **无 GUI/无 tty**：弹窗失败会快速报错而不是挂起；请改用终端 `grant`。
 - **申请阻塞**：图形时长+密码弹窗总超时约 5 分钟（`DIALOG_TIMEOUT`），无人值守请按最长可能时间估足，
   用户 5 分钟不响应则本次申请作废，需重新 `request`。
@@ -173,6 +180,7 @@ sudoers/skill、从 `sudo.conf` 只摘除标记块（外来内容原样保留）
   必然失败，请在有 tty 的终端用 `sudo` 密码执行卸载。
 - **`lock` 报恢复失败**：多为无有效 timestamp（如刚 `sudo -k`）；限时租约可等定时恢复或重授权覆盖，
   `until-lock`（`-1`）必须在 tty 补 `lock`，否则配置一直是无限。
+  tty 下 `lock` 会尝试一次交互式恢复（15s 输密码超时即报错走人，不会挂起）。
 
 ## License
 

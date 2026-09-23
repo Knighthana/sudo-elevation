@@ -1,5 +1,7 @@
 #!/bin/bash
 # 0.1.4 regression: P1 lock until-lock residual + P2 items + porcelain.
+# 0.1.5 additions: composite durations, invalid-lease-as-expired, reason
+# 60/200 thresholds, kdialog timeout, reinstall self-heal.
 # Fast, no long sleeps (uses synthetic leases where possible).
 set -euo pipefail
 . /src/tests/docker/lib.sh
@@ -11,6 +13,10 @@ log "X01 invalid durations rejected"
 assert_fail /usr/local/bin/sudo-elevation parse garbage
 assert_fail /usr/local/bin/sudo-elevation parse ""
 assert_fail /usr/local/bin/sudo-elevation parse 1x
+assert_fail /usr/local/bin/sudo-elevation parse 1m30s
+out=$(/usr/local/bin/sudo-elevation parse 1m30s 2>&1 || true)
+grep -qF '90s' <<<"$out" || die "composite hint missing: $out"
+ok "1m30s rejected with hint"
 if /usr/local/libexec/sudo-elevation/grant --user tester --minutes 9999999 >/dev/null 2>&1; then die "over-MAX accepted"; fi
 ok "over-MAX rejected"
 if runuser -u tester -- /usr/local/bin/sudo-elevation request --for garbage --reason x >/dev/null 2>&1; then die "request garbage accepted"; fi
@@ -80,3 +86,61 @@ assert_eq "$got" 15 "bad BASE ignored"
 printf 'BASE_MINUTES=30\n' > /tmp/c.conf
 got=$(bash -c '. /usr/local/libexec/sudo-elevation/common.sh; SUDO_ELEVATION_CONFIG=/tmp/c.conf se_load_config; printf "%s" "$BASE_MINUTES"')
 assert_eq "$got" 30 "good BASE accepted"
+
+log "R invalid lease treated as expired (0)"
+start=$(date +%s)
+printf 'epoch=%s-1-1\nuser=tester\nminutes=bogus\ngranted_at=test\nreason=test\nrestore=none\n' \
+	"$start" > /run/sudo-elevation/tester.lease
+out=$(runuser -u tester -- /usr/local/bin/sudo-elevation status)
+grep -qF '0 秒' <<<"$out" || die "invalid not shown as 0: $out"
+grep -qF '已到期' <<<"$out" || die "invalid not expired: $out"
+ok "human shows 0 + expired"
+out=$(runuser -u tester -- /usr/local/bin/sudo-elevation status --porcelain)
+grep -qF 'remaining_s=0' <<<"$out" || die "porcelain not 0: $out"
+ok "porcelain remaining_s=0"
+rm -f /run/sudo-elevation/tester.lease
+/usr/local/libexec/sudo-elevation/restore --user tester --force >/dev/null || true
+
+log "R reason 60/200 thresholds"
+r81=$(head -c 81 /dev/zero | tr '\0' 'z')
+/usr/local/libexec/sudo-elevation/grant --user tester --minutes 5 --reason "$r81" 2>/tmp/se-r81.err >/dev/null
+if grep -q '截断' /tmp/se-r81.err; then die "81-char reason should not warn"; fi
+ok "81 chars: no warning"
+/usr/local/libexec/sudo-elevation/restore --user tester --force >/dev/null || true
+r201=$(head -c 201 /dev/zero | tr '\0' 'z')
+/usr/local/libexec/sudo-elevation/grant --user tester --minutes 5 --reason "$r201" 2>/tmp/se-r201.err >/dev/null
+assert_contains /tmp/se-r201.err "截断"
+ok "201 chars: warns"
+/usr/local/libexec/sudo-elevation/restore --user tester --force >/dev/null || true
+
+log "K kdialog timeout enforced via timeout(1)"
+printf 'DIALOG_TIMEOUT=2\n' >> /etc/sudo-elevation.conf
+printf '30\n' > /tmp/se-slow-sleep
+chmod 0644 /tmp/se-slow-sleep
+start=$(date +%s)
+rc=0
+runuser -u tester -- env SUDO_ASKPASS="$REPO/tests/docker/fake-askpass-kdialog-slow" \
+	/usr/local/bin/sudo-elevation request --for 2h --reason "slow kdialog" >/tmp/se-slow.log 2>&1 || rc=$?
+elapsed=$(( $(date +%s) - start ))
+[ "$rc" != 0 ] || die "hanging kdialog should fail the request"
+[ "$elapsed" -lt 15 ] || die "kdialog not killed fast enough: ${elapsed}s"
+ok "hanging kdialog killed in ${elapsed}s"
+sed -i '/^DIALOG_TIMEOUT=/d' /etc/sudo-elevation.conf
+rm -f /tmp/se-slow-sleep /tmp/se-kdialog-slow.log
+rm -f /home/tester/.cache/sudo-elevation/request /home/tester/.cache/sudo-elevation/choice || true
+
+log "R reinstall during active lease self-heals"
+set_ui 0.1 testpass
+as_tester /usr/local/bin/sudo-elevation request --for 6s --reason "reinstall race" >/dev/null
+assert_contains /etc/sudoers.d/90-sudo-elevation-tester "timestamp_timeout=0.1"
+"$REPO/install.sh" --user tester --test-hooks >/dev/null
+assert_contains /etc/sudo-elevation.conf "BASE_MINUTES=15"
+out=$(as_tester /usr/local/bin/sudo-elevation status)
+grep -qF '活动租约' <<<"$out" || die "stale lease display missing: $out"
+ok "stale lease shown until old restore fires"
+for _i in $(seq 1 20); do
+	[ ! -f /run/sudo-elevation/tester.lease ] && break
+	sleep 1
+done
+assert_no_file /run/sudo-elevation/tester.lease
+ok "old restore self-healed"

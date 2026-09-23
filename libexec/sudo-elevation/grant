@@ -59,7 +59,9 @@ if [ -n "$request_file" ] && [ -f "$request_file" ]; then
 	[ -n "$reason" ] || reason=$(se_read_kv "$request_file" reason || true)
 	[ -n "$requested" ] || requested=$(se_read_kv "$request_file" requested_minutes || true)
 fi
-case "${requested-}" in ''|*[!0-9.]*) requested=$minutes ;; esac
+# Strict shape (same class as se_load_config): loose [!0-9.] also let "1.2.3"
+# through to audit; fall back to the granted value instead.
+case "${requested-}" in ''|*[^0-9.]*|*.*.*|.*|*.) requested=$minutes ;; esac
 reason_raw=$reason
 reason=$(se_sanitize_reason "$reason")
 reason_truncated=0

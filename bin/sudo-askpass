@@ -111,6 +111,18 @@ if [ "$ui" = none ]; then
 	fail "没有可用的图形界面（zenity/kdialog），且无 tty 可提示；请在终端执行 sudo-elevation grant --for <时长> --reason \"...\""
 fi
 
+# kdialog itself has no --timeout flag (unlike zenity), so DIALOG_TIMEOUT is
+# enforced here with timeout(1) (coreutils, already a dependency). Exit 124
+# on timeout falls into the callers' `|| exit 1`, matching zenity's timeout
+# fail-closed behavior. DIALOG_TIMEOUT=0 means no timeout (bare kdialog).
+kd() {
+	if [ "${DIALOG_TIMEOUT:-300}" = "0" ]; then
+		kdialog "$@"
+	else
+		timeout "$DIALOG_TIMEOUT" kdialog "$@"
+	fi
+}
+
 # --- lease request dialog ---------------------------------------------------
 
 if [ "$fresh" = 1 ] && [ "$ui" = zenity ]; then
@@ -201,7 +213,7 @@ if [ "$fresh" = 1 ] && [ "$ui" = kdialog ]; then
 		if [ "$i" = 0 ]; then st=on; else st=off; fi
 		list_args+=("r$i" "${row_labels[$i]}" "$st")
 	done
-	sel_tag=$(kdialog "${list_args[@]}" 2>/dev/null) || exit 1
+	sel_tag=$(kd "${list_args[@]}" 2>/dev/null) || exit 1
 
 	minutes=""
 	sel_label=""
@@ -213,12 +225,12 @@ if [ "$fresh" = 1 ] && [ "$ui" = kdialog ]; then
 		fi
 	done
 	if [ "$sel_label" = "手动输入…" ]; then
-		entry=$(kdialog --inputbox "自定义时长（例: 90s / 45m / 2h / 1d，裸数字 = 分钟）" 2>/dev/null) || exit 1
+		entry=$(kd --inputbox "自定义时长（例: 90s / 45m / 2h / 1d，裸数字 = 分钟）" 2>/dev/null) || exit 1
 		minutes=$(se_parse_minutes "$entry") || fail "无法解析自定义时长: $entry"
 	fi
 	[ -n "$minutes" ] || fail "请选择时长"
 	se_valid_minutes "$minutes" || fail "时长超出范围（上限 $MAX_MINUTES 分钟）: $minutes"
-	pass=$(kdialog --password "sudo 密码（批准 $(se_human_minutes "$minutes")）" 2>/dev/null) || exit 1
+	pass=$(kd --password "sudo 密码（批准 $(se_human_minutes "$minutes")）" 2>/dev/null) || exit 1
 	[ -n "${pass-}" ] || exit 1
 	write_choice "$minutes" gui
 	printf '%s\n' "$pass" >&3
@@ -238,7 +250,7 @@ case "$ui" in
 		pass=$(zenity --password --title="$title" --timeout=120 2>/dev/null) || exit 1
 		;;
 	kdialog)
-		pass=$(kdialog --password "$title" 2>/dev/null) || exit 1
+		pass=$(kd --password "$title" 2>/dev/null) || exit 1
 		;;
 esac
 [ -n "${pass-}" ] || exit 1

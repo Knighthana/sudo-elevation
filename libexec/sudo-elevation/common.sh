@@ -112,11 +112,15 @@ se_valid_minutes() {
 	awk -v m="$m" -v max="$MAX_MINUTES" 'BEGIN{exit !(m+0 >= 0 && m+0 <= max+0)}'
 }
 
+# Duration spec is single value + single unit only (90s/45m/2h/1d/bare/until-lock);
+# composites like 1m30s are rejected by se_parse_minutes. Anything unparseable
+# reaching display (e.g. a hand-edited lease) is treated as 0 so it fails
+# closed immediately instead of looking like a valid window.
 se_human_minutes() {
 	local m=${1:-0}
 	if [ "$m" = "-1" ]; then printf '直到手动 lock'; return 0; fi
 	case "$m" in
-		''|*[^0-9.]*|*.*.*|.*|*.) printf '未知'; return 0 ;;
+		''|*[^0-9.]*|*.*.*|.*|*.) printf '0 秒'; return 0 ;;
 	esac
 	awk -v m="$m" 'BEGIN{
 		s = m * 60
@@ -133,7 +137,7 @@ se_human_minutes_en() {
 	local m=${1:-0}
 	if [ "$m" = "-1" ]; then printf 'until-lock'; return 0; fi
 	case "$m" in
-		''|*[^0-9.]*|*.*.*|.*|*.) printf 'unknown'; return 0 ;;
+		''|*[^0-9.]*|*.*.*|.*|*.) printf '0 seconds'; return 0 ;;
 	esac
 	if [ "$m" = "0" ]; then printf '0 (strict: password every time)'; return 0; fi
 	awk -v m="$m" 'BEGIN{

@@ -23,13 +23,16 @@ usage: sudo-elevation <command> [options]
 commands:
   request --for <duration> [--reason TEXT]   request a time-boxed sudo lease (GUI dialog)
   grant   --for <duration> [--reason TEXT]   approve a lease from a terminal (headless)
-  status [--porcelain]                       show active lease and base window (--porcelain: KV lines)
+  status [--porcelain]                       show active lease and base window
   lock                                       revoke sudo cache and restore base window
   uninstall [--purge]                        remove sudo-elevation (--purge drops the audit log too)
   parse <duration>                           print minutes for a duration spec
   version                                    print version
 
-duration spec: 90s | 45m | 2h | 1d | 45 (bare number = minutes) | until-lock (-1)
+duration spec (single value + single unit only): 90s | 45m | 2h | 1d | 45 (bare = minutes)
+  | until-lock (-1). No composites: 1m30s is invalid, use 90s. Unparseable specs fail immediately.
+reason: keep <=60 chars (hard-truncated with warning at 200).
+--porcelain: machine-readable KV, one pair per line, split on the FIRST '=' (values are single-line).
 EOF
 }
 
@@ -49,7 +52,7 @@ case "$cmd" in
 			esac
 		done
 		[ -n "$spec" ] || { echo "request: --for is required (example: --for 2h)" >&2; exit 2; }
-		minutes=$(se_parse_minutes "$spec") || { echo "request: bad duration: $spec" >&2; exit 2; }
+		minutes=$(se_parse_minutes "$spec") || { echo "request: bad duration: $spec (single value+unit: 90s/45m/2h/1d/bare-minutes/until-lock; 1m30s invalid, use 90s)" >&2; exit 2; }
 		se_load_config
 		se_valid_minutes "$minutes" || {
 			echo "request: duration out of range: $spec (max $MAX_MINUTES minutes; use until-lock for infinity)" >&2
@@ -100,7 +103,7 @@ case "$cmd" in
 			esac
 		done
 		[ -n "$spec" ] || { echo "grant: --for is required (example: --for 1h)" >&2; exit 2; }
-		minutes=$(se_parse_minutes "$spec") || { echo "grant: bad duration: $spec" >&2; exit 2; }
+		minutes=$(se_parse_minutes "$spec") || { echo "grant: bad duration: $spec (single value+unit: 90s/45m/2h/1d/bare-minutes/until-lock; 1m30s invalid, use 90s)" >&2; exit 2; }
 		args=(--user "$ME" --minutes "$minutes")
 		[ -n "$reason" ] && args+=(--reason "$(se_sanitize_reason "$reason")")
 		if [ -t 0 ] || [ -t 1 ]; then
@@ -131,17 +134,22 @@ case "$cmd" in
 			if [ "$porcelain" = 1 ]; then
 				# Machine-readable KV. remaining_s=-1 means infinite
 				# (until-lock); 0 means expired-but-not-yet-restored.
+				# Unparseable minutes are treated as 0 (fail closed).
 				remaining_s=""
 				if [ "$minutes" = "-1" ]; then
 					remaining_s=-1
 				elif [ -n "$minutes" ]; then
-					start=${epoch%%-*}
-					case "$start" in ''|*[!0-9]*) start=0 ;; esac
-					now=$(date +%s)
-					secs=$(awk -v m="$minutes" 'BEGIN{printf "%d", (m*60)+0.5}')
-					rem=$((start + secs - now))
-					[ "$rem" -lt 0 ] && rem=0
-					remaining_s=$rem
+					case "$minutes" in ''|*[^0-9.]*|*.*.*|.*|*.) remaining_s=0 ;;
+					*)
+						start=${epoch%%-*}
+						case "$start" in ''|*[!0-9]*) start=0 ;; esac
+						now=$(date +%s)
+						secs=$(awk -v m="$minutes" 'BEGIN{printf "%d", (m*60)+0.5}')
+						rem=$((start + secs - now))
+						[ "$rem" -lt 0 ] && rem=0
+						remaining_s=$rem
+						;;
+					esac
 				fi
 				managed="$SE_SUDOERS_DIR/90-sudo-elevation-$(se_user_slug "$ME")"
 				if [ "$(id -u)" = 0 ]; then
@@ -199,13 +207,21 @@ case "$cmd" in
 	lock)
 		se_load_config
 		restored=0
+		timed_out=0
 		if sudo -n "$RESTORE_BIN" --user "$ME" --force >/dev/null 2>&1; then
 			restored=1
-		elif { [ -t 0 ] || [ -t 1 ]; } && sudo "$RESTORE_BIN" --user "$ME" --force >/dev/null 2>&1; then
+		elif [ -t 0 ] || [ -t 1 ]; then
 			# Interactive fallback: no cached timestamp (e.g. after a bare
 			# `sudo -k`), but the user is at a tty and can authenticate once
-			# to actually remove the lease config.
-			restored=1
+			# to actually remove the lease config. Wrapped in timeout so an
+			# unattended pty (no human behind it) fails fast instead of
+			# hanging on the password prompt: a hang costs more than an error.
+			# (case with no match returns 0, keeping this safe under set -e.)
+			if timeout 15 sudo "$RESTORE_BIN" --user "$ME" --force >/dev/null 2>&1; then
+				restored=1
+			else
+				case "$?" in 124) timed_out=1 ;; esac
+			fi
 		fi
 		sudo -k 2>/dev/null || true
 		if [ "$restored" = 1 ]; then
@@ -213,12 +229,15 @@ case "$cmd" in
 			exit 0
 		fi
 		lease_minutes=$(se_read_kv "$(se_lease_file "$ME")" minutes 2>/dev/null || true)
+		if [ "$timed_out" = 1 ]; then
+			printf 'sudo-elevation: lock 认证超时（15s 无输入），请重试 lock\n' >&2
+		fi
 		if [ "$lease_minutes" = "-1" ]; then
-			cat >&2 <<'EOF'
+			cat >&2 <<EOF
 sudo-elevation: lock 失败：until-lock 配置仍在（timestamp_timeout=-1）。
 sudo -k 只清本次缓存，下次任意密码认证会直接获得无限期免密。
-请在有 tty 的终端执行一次 sudo -k 之后的 `sudo sudo-elevation lock` 或
-`sudo /usr/local/libexec/sudo-elevation/restore --user $USER --force`（输密码即根治）。
+请在有 tty 的终端执行一次 sudo -k 之后的 \`sudo sudo-elevation lock\` 或
+\`sudo /usr/local/libexec/sudo-elevation/restore --user $ME --force\`（输密码即根治）。
 EOF
 			printf 'sudo-elevation: 已撤销当前 sudo 缓存，但 until-lock 配置仍在，需尽快在终端补 lock（见上方 stderr）\n'
 			exit 1
@@ -248,7 +267,7 @@ EOF
 		fi
 		;;
 	parse)
-		se_parse_minutes "${1-}" || { echo "parse: bad duration: ${1-}" >&2; exit 2; }
+		se_parse_minutes "${1-}" || { echo "parse: bad duration: ${1-} (single value+unit: 90s/45m/2h/1d/bare-minutes/until-lock; 1m30s invalid, use 90s)" >&2; exit 2; }
 		printf '\n'
 		;;
 	version)

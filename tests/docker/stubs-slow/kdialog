@@ -1,0 +1,12 @@
+#!/bin/bash
+# kdialog stub that hangs: verifies DIALOG_TIMEOUT is enforced at the shell
+# layer via timeout(1), without needing a real KDE environment.
+# Hangs SE_SLOW_SLEEP seconds (default 30), then answers like the fast stub.
+printf '%s\n' "$*" >> /tmp/se-kdialog-slow.log
+sleep "${SE_SLOW_SLEEP:-30}"
+case "$*" in
+	*--radiolist*) printf 'r0\n' ;;
+	*--password*) printf 'testpass\n' ;;
+	*--inputbox*) printf '30m\n' ;;
+esac
+exit 0

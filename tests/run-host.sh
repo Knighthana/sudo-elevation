@@ -116,6 +116,8 @@ log "skill is English and concise"
 grep -q '^Rule: always try `sudo -n' "$SB/skill/SKILL.md" || die "skill not English"
 grep -q 'sudo-elevation request' "$SB/skill/SKILL.md" || die "skill missing request"
 grep -q '15 minutes' "$SB/skill/SKILL.md" || die "skill base not English"
+grep -qF '<=60' "$SB/skill/SKILL.md" || die "skill missing 60-char guidance"
+grep -qF 'do not loop requests' "$SB/skill/SKILL.md" || die "skill missing gone-user rule"
 ok "skill English"
 
 log "status --porcelain (no lease)"
@@ -125,17 +127,22 @@ grep -qF 'active=0' <<<"$porc" || die "porcelain inactive: $porc"
 grep -qF 'base_minutes=15' <<<"$porc" || die "porcelain base: $porc"
 ok "porcelain inactive"
 
-log "strict config rejects malformed numbers"
+log "strict config rejects malformed numbers; invalid displays as 0"
 bash -c '
 	. "$1/libexec/sudo-elevation/common.sh" || exit 1
 	printf "BASE_MINUTES=15.5.5\n" > "$2/c.conf"
 	BASE_MINUTES=15 SUDO_ELEVATION_CONFIG="$2/c.conf" se_load_config
 	[ "$BASE_MINUTES" = 15 ] || exit 1
-	[ "$(se_human_minutes "?")" = "未知" ] || exit 1
+	[ "$(se_human_minutes "?")" = "0 秒" ] || exit 1
+	[ "$(se_human_minutes_en "?")" = "0 seconds" ] || exit 1
 	[ "$(se_human_minutes_en 15)" = "15 minutes" ] || exit 1
 	[ "$(se_human_minutes_en 0)" = "0 (strict: password every time)" ] || exit 1
+	se_parse_minutes 1m30s >/dev/null 2>&1 && exit 1
 	exit 0
 ' _ "$REPO" "$SB" || die "strict config/human"
+if "$SE" parse 1m30s >/dev/null 2>&1; then die "parse 1m30s accepted"; fi
+out=$("$SE" parse 1m30s 2>&1 || true)
+grep -qF '90s' <<<"$out" || die "composite hint missing: $out"
 ok "strict config"
 
 log "uninstall --dry-run touches nothing"
