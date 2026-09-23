@@ -112,6 +112,40 @@ grep -q 'Path askpass /bin/false' "$SB/conflict/etc/sudo.conf" || die "foreign l
 grep -q '^# >>> sudo-elevation >>>$' "$SB/conflict/etc/sudo.conf" || die "block missing"
 ok "--force works"
 
+log "skill is English and concise"
+grep -q '^Rule: always try `sudo -n' "$SB/skill/SKILL.md" || die "skill not English"
+grep -q 'sudo-elevation request' "$SB/skill/SKILL.md" || die "skill missing request"
+grep -q '15 minutes' "$SB/skill/SKILL.md" || die "skill base not English"
+ok "skill English"
+
+log "status --porcelain (no lease)"
+export SUDO_ELEVATION_PREFIX="$SB/root"
+porc=$("$SE" status --porcelain)
+grep -qF 'active=0' <<<"$porc" || die "porcelain inactive: $porc"
+grep -qF 'base_minutes=15' <<<"$porc" || die "porcelain base: $porc"
+ok "porcelain inactive"
+
+log "strict config rejects malformed numbers"
+bash -c '
+	. "$1/libexec/sudo-elevation/common.sh" || exit 1
+	printf "BASE_MINUTES=15.5.5\n" > "$2/c.conf"
+	BASE_MINUTES=15 SUDO_ELEVATION_CONFIG="$2/c.conf" se_load_config
+	[ "$BASE_MINUTES" = 15 ] || exit 1
+	[ "$(se_human_minutes "?")" = "未知" ] || exit 1
+	[ "$(se_human_minutes_en 15)" = "15 minutes" ] || exit 1
+	[ "$(se_human_minutes_en 0)" = "0 (strict: password every time)" ] || exit 1
+	exit 0
+' _ "$REPO" "$SB" || die "strict config/human"
+ok "strict config"
+
+log "uninstall --dry-run touches nothing"
+touch "$SB/root/etc/sudo.conf.bak.20990101000000"
+"$REPO/install.sh" --prefix "$SB/root" --user "$ME" --skill-dir "$SB/skill" --uninstall --dry-run >/dev/null
+[ -f "$SB/root/etc/sudo.conf.bak.20990101000000" ] || die "dry-run deleted backup"
+[ -f "$SB/root/usr/local/bin/sudo-elevation" ] || die "dry-run deleted binaries"
+rm -f "$SB/root/etc/sudo.conf.bak.20990101000000"
+ok "uninstall dry-run clean"
+
 log "uninstall via CLI subcommand (prefix sandbox, no sudo needed)"
 "$SE" uninstall >/dev/null
 for f in usr/local/bin/sudo-askpass usr/local/bin/sudo-elevation \

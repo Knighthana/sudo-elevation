@@ -108,7 +108,7 @@ esac
 # <<< test hooks <<<
 
 if [ "$ui" = none ]; then
-	fail "没有可用的图形界面（zenity/kdialog），且无 tty 可提示"
+	fail "没有可用的图形界面（zenity/kdialog），且无 tty 可提示；请在终端执行 sudo-elevation grant --for <时长> --reason \"...\""
 fi
 
 # --- lease request dialog ---------------------------------------------------

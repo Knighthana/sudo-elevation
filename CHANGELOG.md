@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.4 - 2026-09-24
+
+- P1: `lock` 在无有效 timestamp 时不再假装成功——`until-lock`（`-1`）残留则非零退出并指引
+  tty 补 `lock`/`restore`；tty 下自动回退一次交互式 `sudo restore` 真删配置；fallback 文案按
+  `-1`/限时区分；README 撤销语义拆分为缓存 vs 配置两层。
+- feat: `status --porcelain` 机器可读 KV（`active/minutes/remaining_s/epoch/reason/restore/base_minutes/current_timeout`，
+  `remaining_s=-1` 表无限）；人类中文输出不动。
+- feat: agent SKILL 全英文精简（~50 行，`status --porcelain`、5 分钟弹窗超时、无人值守时长、
+  `until-lock must lock`），人类 README 保持中文详细；`SKILL.md.in` 占位符改为
+  `@@BASE_HUMAN_EN@@`/`@@VERSION@@`，`0` 渲染为 strict 提示。
+- fix: 卸载 `--dry-run` 真 dry-run（`rmdir`/备份清理全包 `run`，按 glob 逐个删）。
+- hardening: `sudo.conf` 备份名加 PID 防同秒碰撞，剪枝改 shell 循环；SKILL `sed` 换 `|` 分隔并转义；
+  配置数字校验收紧（拒 `15.5.5`/`.`）；损坏 lease 显示“未知”；`grant -1` 文案去 `sudo -k` 误导；
+  超长 reason 截断 stderr 提示；无 GUI 报错附 `grant` 示例；`install.sh --help` 补 MAX/strict 提示。
+- docs: 审计范围（只记 grant/restore）、申请阻塞 5 分钟、卸载 headless、MAX 风险提示。
+- tests: 新增 `15_extra.sh`（非法时长/reason 截断/porcelain/fail-closed/取消保缓存/C1/C2）；
+  host 新增 skill 英文/porcelain/strict/dry-run 断言。
+
 ## 0.1.3 - 2026-09-22
 
 - install: 强制校验 `sudo >= 1.8.21`（租约模型依赖该版本引入的 `timestamp_type`，

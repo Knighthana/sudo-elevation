@@ -48,7 +48,12 @@ se_load_config() {
 				continue
 				;;
 		esac
-		case "$val" in ''|*[!0-9.]*) continue ;; esac
+		# Strict numeric shape: digits with at most one dot (e.g. 15, 0.4).
+		# The old loose class [!0-9.] accepted "15.5.5"/"." and relied on
+		# awk's prefix coercion; reject such values outright instead.
+		case "$val" in
+			''|*[^0-9.]*|*.*.*|.*|*.) continue ;;
+		esac
 		case "$key" in
 			BASE_MINUTES) BASE_MINUTES=$val ;;
 			MAX_MINUTES) MAX_MINUTES=$val ;;
@@ -78,6 +83,9 @@ se_apply_gui_backend() {
 #   -1|until-lock|lock|infinite   never expires until manual lock/reboot
 #   90s  45m  2h  1d              seconds/minutes/hours/days
 #   45                            bare number = minutes (sudo's native unit)
+# Note: extremely small second values (e.g. 0.0000001s) format via %.10g
+# into scientific notation (1.66667e-09), which se_valid_minutes rejects
+# on purpose (fail-closed). Callers surface this as "out of range".
 se_parse_minutes() {
 	local spec=${1-} num unit
 	case "$spec" in
@@ -107,12 +115,33 @@ se_valid_minutes() {
 se_human_minutes() {
 	local m=${1:-0}
 	if [ "$m" = "-1" ]; then printf '直到手动 lock'; return 0; fi
+	case "$m" in
+		''|*[^0-9.]*|*.*.*|.*|*.) printf '未知'; return 0 ;;
+	esac
 	awk -v m="$m" 'BEGIN{
 		s = m * 60
 		if (s < 90) printf "%.0f 秒", s
 		else if (m < 60) { if (m == int(m)) printf "%d 分钟", m; else printf "%.1f 分钟", m }
 		else if (m < 1440) { h = m/60; if (h == int(h)) printf "%d 小时", h; else printf "%.1f 小时", h }
 		else { d = m/1440; if (d == int(d)) printf "%d 天", d; else printf "%.1f 天", d }
+	}'
+}
+
+# English variant for the agent-facing SKILL (keeps CLI/README Chinese intact).
+# 0 renders as strict-mode hint so "0 seconds" never confuses agents.
+se_human_minutes_en() {
+	local m=${1:-0}
+	if [ "$m" = "-1" ]; then printf 'until-lock'; return 0; fi
+	case "$m" in
+		''|*[^0-9.]*|*.*.*|.*|*.) printf 'unknown'; return 0 ;;
+	esac
+	if [ "$m" = "0" ]; then printf '0 (strict: password every time)'; return 0; fi
+	awk -v m="$m" 'BEGIN{
+		s = m * 60
+		if (s < 90) printf "%.0f seconds", s
+		else if (m < 60) { if (m == int(m)) printf "%d minutes", m; else printf "%.1f minutes", m }
+		else if (m < 1440) { h = m/60; if (h == int(h)) printf "%d hours", h; else printf "%.1f hours", h }
+		else { d = m/1440; if (d == int(d)) printf "%d days", d; else printf "%.1f days", d }
 	}'
 }
 
@@ -162,6 +191,8 @@ se_version_ge() {
 	}'
 }
 
+# Filename slug for per-user sudoers/lease files. Dots are intentionally
+# mapped to '_' too (e.g. first.last -> first_last) so names stay portable.
 se_user_slug() { printf '%s' "$1" | tr -c 'A-Za-z0-9_-' '_'; }
 
 se_home_of() { getent passwd "$1" 2>/dev/null | cut -d: -f6; }

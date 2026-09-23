@@ -45,8 +45,8 @@ usage: sudo ./install.sh [options]
 
 options:
   --user USER           target user (default: $SUDO_USER or current user)
-  --base-timeout SPEC   base window (default 15m; examples: 15m, 30m)
-  --max-timeout SPEC    maximum approvable lease (default 365d)
+  --base-timeout SPEC   base window (default 15m; examples: 15m, 30m; strict: 0)
+  --max-timeout SPEC    maximum approvable lease (default 365d; non-build hosts: 12h/7d)
   --prefix DIR          install everything under DIR (testing/sandbox)
   --skill-dir DIR       override opencode skill directory
   --no-skill            do not install the opencode skill
@@ -164,9 +164,16 @@ write_sudo_conf() {
 		return 0
 	fi
 	if [ -f "$SE_SUDO_CONF" ]; then
-		cp -a "$SE_SUDO_CONF" "$SE_SUDO_CONF.bak.$(date +%Y%m%d%H%M%S)"
+		# Backup names carry PID so two installs within the same second
+		# never collide; prune still keeps only the newest one.
+		cp -a "$SE_SUDO_CONF" "$SE_SUDO_CONF.bak.$(date +%Y%m%d%H%M%S).$$"
 		# Keep only the newest backup; repeated installs must not pile up.
-		{ ls -1t "$SE_SUDO_CONF".bak.* 2>/dev/null || true; } | tail -n +2 | xargs -r rm -f -- || true
+		# Loop instead of xargs so unusual filenames stay safe (names are
+		# controlled timestamps, but stay defensive here as root).
+		{ ls -1t "$SE_SUDO_CONF".bak.* 2>/dev/null || true; } | tail -n +2 | while IFS= read -r old; do
+			[ -n "$old" ] || continue
+			rm -f -- "$old" || true
+		done
 	fi
 	se_install_file "$tmp" "$SE_SUDO_CONF" 0644
 	rm -f "$tmp"
@@ -188,19 +195,23 @@ manifest_users() {
 
 install_skill() {
 	[ "$DO_SKILL" = 1 ] || return 0
-	local home dir target base_human
+	local home dir target base_human_en esc_base esc_ver
 	home=$(se_home_of "$TARGET_USER")
 	[ -n "$home" ] || return 0
 	dir=${SKILL_DIR:-$home/.config/opencode/skill/sudo-elevation}
 	target="$dir/SKILL.md"
-	base_human=$(se_human_minutes "$BASE_MINUTES")
+	base_human_en=$(se_human_minutes_en "$BASE_MINUTES")
 	if [ "$DRY" = 1 ]; then
 		say "[dry-run] install skill -> $target"
 		return 0
 	fi
 	mkdir -p "$dir"
-	sed -e "s/@@BASE_HUMAN@@/$base_human/g" \
-		-e "s/@@VERSION@@/$VERSION/g" \
+	# '|' delimiter plus '&' escape: future English duration text must not
+	# break the substitution even if it ever contains '/' or '&'.
+	esc_base=$(printf '%s' "$base_human_en" | sed -e 's/[&|\\]/\\&/g')
+	esc_ver=$(printf '%s' "$VERSION" | sed -e 's/[&|\\]/\\&/g')
+	sed -e "s|@@BASE_HUMAN_EN@@|$esc_base|g" \
+		-e "s|@@VERSION@@|$esc_ver|g" \
 		"$REPO_DIR/templates/SKILL.md.in" > "$target"
 	chmod 0644 "$target"
 	if [ "$(id -u)" = 0 ]; then
@@ -335,11 +346,11 @@ do_uninstall() {
 			if [ -f "$skdir/SKILL.md" ] && grep -q 'sudo-elevation' "$skdir/SKILL.md"; then
 				run rm -f "$skdir/SKILL.md"
 			fi
-			rmdir "$skdir" 2>/dev/null || true
+			run rmdir "$skdir" 2>/dev/null || true
 		elif [ -n "$home" ]; then
 			sk="$home/.config/opencode/skill/sudo-elevation"
 			[ -f "$sk/SKILL.md" ] && grep -q 'sudo-elevation' "$sk/SKILL.md" && run rm -f "$sk/SKILL.md"
-			rmdir "$sk" 2>/dev/null || true
+			run rmdir "$sk" 2>/dev/null || true
 		fi
 	done
 
@@ -356,12 +367,16 @@ do_uninstall() {
 
 	run rm -f "$SE_BIN_DIR/sudo-askpass" "$SE_BIN_DIR/sudo-elevation"
 	run rm -f "$SE_LIBEXEC/common.sh" "$SE_LIBEXEC/grant" "$SE_LIBEXEC/restore" "$SE_LIBEXEC/install.sh"
-	rmdir "$SE_LIBEXEC" 2>/dev/null || true
+	run rmdir "$SE_LIBEXEC" 2>/dev/null || true
 	run rm -f "$SE_SHARE/VERSION" "$SE_SHARE/LICENSE" "$SE_SHARE/manifest"
-	rmdir "$SE_SHARE" 2>/dev/null || true
+	run rmdir "$SE_SHARE" 2>/dev/null || true
 	run rm -f "$SE_CONFIG"
-	rm -f "$SE_SUDO_CONF".bak.* 2>/dev/null || true
-	rmdir "$SE_RUNTIME_DIR" 2>/dev/null || true
+	# Expand explicitly so dry-run never touches the filesystem.
+	for _bak in "$SE_SUDO_CONF".bak.*; do
+		[ -e "$_bak" ] || continue
+		run rm -f "$_bak"
+	done
+	run rmdir "$SE_RUNTIME_DIR" 2>/dev/null || true
 	[ "$PURGE" = 1 ] && run rm -f "$SE_LOG"
 
 	if [ "$DRY" != 1 ] && [ "$(id -u)" = 0 ] && [ -z "$SE_PREFIX" ]; then

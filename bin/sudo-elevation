@@ -23,7 +23,7 @@ usage: sudo-elevation <command> [options]
 commands:
   request --for <duration> [--reason TEXT]   request a time-boxed sudo lease (GUI dialog)
   grant   --for <duration> [--reason TEXT]   approve a lease from a terminal (headless)
-  status                                     show active lease and base window
+  status [--porcelain]                       show active lease and base window (--porcelain: KV lines)
   lock                                       revoke sudo cache and restore base window
   uninstall [--purge]                        remove sudo-elevation (--purge drops the audit log too)
   parse <duration>                           print minutes for a duration spec
@@ -112,6 +112,14 @@ case "$cmd" in
 		fi
 		;;
 	status)
+		porcelain=0
+		while [ $# -gt 0 ]; do
+			case "$1" in
+				--porcelain) porcelain=1; shift ;;
+				-h|--help) usage; exit 0 ;;
+				*) echo "status: unknown argument: $1" >&2; exit 2 ;;
+			esac
+		done
 		se_load_config
 		lease=$(se_lease_file "$ME")
 		if [ -f "$lease" ]; then
@@ -120,6 +128,31 @@ case "$cmd" in
 			granted=$(se_read_kv "$lease" granted_at || true)
 			restore=$(se_read_kv "$lease" restore || true)
 			reason=$(se_read_kv "$lease" reason || true)
+			if [ "$porcelain" = 1 ]; then
+				# Machine-readable KV. remaining_s=-1 means infinite
+				# (until-lock); 0 means expired-but-not-yet-restored.
+				remaining_s=""
+				if [ "$minutes" = "-1" ]; then
+					remaining_s=-1
+				elif [ -n "$minutes" ]; then
+					start=${epoch%%-*}
+					case "$start" in ''|*[!0-9]*) start=0 ;; esac
+					now=$(date +%s)
+					secs=$(awk -v m="$minutes" 'BEGIN{printf "%d", (m*60)+0.5}')
+					rem=$((start + secs - now))
+					[ "$rem" -lt 0 ] && rem=0
+					remaining_s=$rem
+				fi
+				managed="$SE_SUDOERS_DIR/90-sudo-elevation-$(se_user_slug "$ME")"
+				if [ "$(id -u)" = 0 ]; then
+					cur=$(grep -h 'timestamp_timeout' "$managed" 2>/dev/null | cut -d= -f2 || true)
+				else
+					cur=$(sudo -n grep -h 'timestamp_timeout' "$managed" 2>/dev/null | cut -d= -f2 || true)
+				fi
+				printf 'active=1\nminutes=%s\nepoch=%s\ngranted_at=%s\nrestore=%s\nreason=%s\nremaining_s=%s\nbase_minutes=%s\ncurrent_timeout=%s\n' \
+					"${minutes:-}" "${epoch:-}" "${granted:-}" "${restore:-none}" "${reason:-}" "$remaining_s" "$BASE_MINUTES" "${cur:-}"
+				exit 0
+			fi
 			printf '活动租约: %s\n' "$(se_human_minutes "${minutes:-?}")"
 			printf '  原因: %s\n' "${reason:-未提供}"
 			printf '  批准于: %s\n' "${granted:-?}"
@@ -139,6 +172,17 @@ case "$cmd" in
 				fi
 			fi
 		else
+			if [ "$porcelain" = 1 ]; then
+				managed="$SE_SUDOERS_DIR/90-sudo-elevation-$(se_user_slug "$ME")"
+				if [ "$(id -u)" = 0 ]; then
+					cur=$(grep -h 'timestamp_timeout' "$managed" 2>/dev/null | cut -d= -f2 || true)
+				else
+					cur=$(sudo -n grep -h 'timestamp_timeout' "$managed" 2>/dev/null | cut -d= -f2 || true)
+				fi
+				printf 'active=0\nminutes=\nepoch=\ngranted_at=\nrestore=\nreason=\nremaining_s=\nbase_minutes=%s\ncurrent_timeout=%s\n' \
+					"$BASE_MINUTES" "${cur:-}"
+				exit 0
+			fi
 			printf '无活动租约（基础窗口 %s）\n' "$(se_human_minutes "$BASE_MINUTES")"
 		fi
 		managed="$SE_SUDOERS_DIR/90-sudo-elevation-$(se_user_slug "$ME")"
@@ -153,16 +197,33 @@ case "$cmd" in
 		exit 0
 		;;
 	lock)
+		se_load_config
 		restored=0
 		if sudo -n "$RESTORE_BIN" --user "$ME" --force >/dev/null 2>&1; then
+			restored=1
+		elif { [ -t 0 ] || [ -t 1 ]; } && sudo "$RESTORE_BIN" --user "$ME" --force >/dev/null 2>&1; then
+			# Interactive fallback: no cached timestamp (e.g. after a bare
+			# `sudo -k`), but the user is at a tty and can authenticate once
+			# to actually remove the lease config.
 			restored=1
 		fi
 		sudo -k 2>/dev/null || true
 		if [ "$restored" = 1 ]; then
 			printf 'sudo-elevation: 已撤销缓存并恢复基础窗口 %s\n' "$(se_human_minutes "$BASE_MINUTES")"
-		else
-			printf 'sudo-elevation: 已撤销当前 sudo 缓存；配置将在下次授权/安装时恢复（sudo 超时仍会保护）\n'
+			exit 0
 		fi
+		lease_minutes=$(se_read_kv "$(se_lease_file "$ME")" minutes 2>/dev/null || true)
+		if [ "$lease_minutes" = "-1" ]; then
+			cat >&2 <<'EOF'
+sudo-elevation: lock 失败：until-lock 配置仍在（timestamp_timeout=-1）。
+sudo -k 只清本次缓存，下次任意密码认证会直接获得无限期免密。
+请在有 tty 的终端执行一次 sudo -k 之后的 `sudo sudo-elevation lock` 或
+`sudo /usr/local/libexec/sudo-elevation/restore --user $USER --force`（输密码即根治）。
+EOF
+			printf 'sudo-elevation: 已撤销当前 sudo 缓存，但 until-lock 配置仍在，需尽快在终端补 lock（见上方 stderr）\n'
+			exit 1
+		fi
+		printf 'sudo-elevation: 已撤销当前 sudo 缓存；配置将在定时恢复/下次授权时回到基础窗口（sudo 超时仍会保护）\n'
 		;;
 	uninstall)
 		purge=()

@@ -60,7 +60,12 @@ if [ -n "$request_file" ] && [ -f "$request_file" ]; then
 	[ -n "$requested" ] || requested=$(se_read_kv "$request_file" requested_minutes || true)
 fi
 case "${requested-}" in ''|*[!0-9.]*) requested=$minutes ;; esac
+reason_raw=$reason
 reason=$(se_sanitize_reason "$reason")
+reason_truncated=0
+if [ "${#reason_raw}" -gt 200 ] || case "$reason_raw" in *$'\n'*|*$'\r'*|*$'\t'*) true ;; *) false ;; esac; then
+	reason_truncated=1
+fi
 
 dest="$SE_SUDOERS_DIR/90-sudo-elevation-$(se_user_slug "$user")"
 tmp=$(mktemp "${TMPDIR:-/tmp}/sudo-elevation-sudoers.XXXXXX")
@@ -92,7 +97,7 @@ se_write_lease "$(se_lease_file "$user")" "$user" \
 se_audit "grant user=$user minutes=$minutes requested=$requested restore=$restore_mech reason=\"$reason\""
 
 if [ "$minutes" = "-1" ]; then
-	printf 'sudo-elevation: 已授权 %s（重启前有效；用 sudo-elevation lock 或 sudo -k 撤销）\n' \
+	printf 'sudo-elevation: 已授权 %s（用 sudo-elevation lock 撤销；sudo -k 仅清缓存，配置仍为无限）\n' \
 		"$(se_human_minutes -1)"
 else
 	secs=$(awk -v m="$minutes" 'BEGIN{printf "%d", (m*60)+0.5}')
@@ -101,6 +106,7 @@ else
 		"$(se_human_minutes "$minutes")" "$expires"
 	[ "$minutes" = "0" ] && printf 'sudo-elevation: 本次授权为“仅本次”，下一条 sudo 仍会请求确认\n'
 fi
+[ "$reason_truncated" = 1 ] && printf 'sudo-elevation: 提示: 原因过长/含换行，已截断记录（最多200字符）\n' >&2
 if [ "$restore_mech" = "failed" ]; then
 	printf 'sudo-elevation: 警告: 无法安排到期自动恢复，配置仍受 sudo 自身超时保护\n' >&2
 fi

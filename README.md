@@ -51,9 +51,9 @@ sudo ./install.sh                 # 默认用户 $SUDO_USER，基础窗口 15m
 
 ```text
 --user USER          目标用户（默认 $SUDO_USER）
---base-timeout SPEC  基础窗口，默认 15m（strict 可设 0）
---max-timeout SPEC   单次可批准的最大时长，默认 365d
---dry-run            只打印将要执行的操作
+--base-timeout SPEC  基础窗口，默认 15m（strict 可设 0，0 表示每次 sudo 都需密码）
+--max-timeout SPEC   单次可批准的最大时长，默认 365d（非长期构建机建议设小，如 12h/7d）
+--dry-run            只打印将要执行的操作，不改动系统
 --force              接管已存在的其他 Path askpass 配置
 --uninstall [--purge] 卸载（--purge 连审计日志一起删）
 ```
@@ -91,11 +91,15 @@ sudo-elevation lock
 ## 行为细节
 
 - **仅本次**：窗口设为 0，授权后立即清理缓存，下一条 sudo 仍会询问。
-- **直到手动 lock**：`timestamp_timeout=-1`，重启或 `sudo-elevation lock` 前有效。
+- **直到手动 lock**：`timestamp_timeout=-1`，`sudo-elevation lock` 前有效；注意 `sudo -k`
+  只清本次缓存，**配置仍为 `-1`**，下次任意密码认证会直接获得无限期免密，必须补一次 `lock`。
 - **租约结束一律清理 sudo 缓存**，避免短租约“漏”出基础窗口的剩余时间。
 - **裸 `sudo -A`**（不走 request）：简单密码弹窗，按基础窗口授权。
-- **审计**：`/var/log/sudo-elevation.log` 记录请求者/原因/请求与批准时长/恢复方式。
+- **审计**：`/var/log/sudo-elevation.log` 只记录租约的 grant/restore（请求者/原因/请求与批准时长/恢复方式），
+  窗口内实际执行的 sudo 命令不在本项目审计范围，如需溯源请另配 sudo `log_input`/`log_output`。
 - **无 GUI/无 tty**：弹窗失败会快速报错而不是挂起；请改用终端 `grant`。
+- **申请阻塞**：图形时长+密码弹窗总超时约 5 分钟（`DIALOG_TIMEOUT`），无人值守请按最长可能时间估足，
+  用户 5 分钟不响应则本次申请作废，需重新 `request`。
 
 ## 安全模型
 
@@ -111,7 +115,9 @@ sudo-elevation lock
 - 批准的是**时间窗口**，不是具体命令；窗口内同用户任意进程都可提权。
 - 弹窗中的“原因”来自 agent，可能被同用户进程伪造（弹窗会标注）。
 - 不保存密码；不修改系统 sudoers 语义之外的任何授权；卸载后完全还原。
-- 撤销：`sudo-elevation lock`、`sudo -k`、重启。
+- 撤销分两层：**缓存**（`sudo -k` 只清本次 timestamp）与**配置**（`sudo-elevation lock` 恢复基础窗口并删租约）。
+  完全撤销必须 `lock`；`until-lock`（`-1`）下仅 `sudo -k`/重启不够，配置仍为无限，必须补 `lock`。
+  `lock` 无有效 timestamp 时会明确报错而非假装成功，此时请在有 tty 的终端补一次 `sudo .../restore --force` 或重 `lock`。
 - 适用场景：个人工作站/开发用 WSL 发行版；不适合共享或生产主机。
 
 ## 测试
@@ -125,7 +131,7 @@ SE_TEST_IMAGES="debian:12" tests/docker/run.sh 03_lease_expiry.sh
 Docker 场景覆盖：安装/幂等/权限位、askpass 认证与错误密码、租约到期与自动恢复、
 仅本次、until-lock + lock、CLI 卸载（含备份/运行时目录清理）、卸载保留第三方配置、
 外来 `Path askpass` 冲突、headless grant、弹窗参数（zenity 与 kdialog）、
-epoch 守卫、无 GUI 快速失败。
+epoch 守卫、无 GUI 快速失败、15_extra（非法时长/reason 截断/porcelain/fail-closed/取消保缓存/P1 回归/strict 配置）。
 
 推送/PR 时 GitHub Actions（`.github/workflows/ci.yml`）自动执行
 shellcheck + host 沙箱 + Docker 矩阵。
@@ -159,9 +165,14 @@ sudoers/skill、从 `sudo.conf` 只摘除标记块（外来内容原样保留）
   默认已在 WSL 下强制 `GDK_BACKEND=x11`（走 XWayland）；仍异常时可在
   `/etc/sudo-elevation.conf` 调整 `GUI_BACKEND=auto|x11|wayland`（改完重装生效）。
 - `libEGL warning ... ZINK ...`：WSLg 无 GPU 直通的软件渲染提示，可忽略。
-- **`request` 报“没有可用的图形界面”**：用终端 `sudo -v` 或 `sudo-elevation grant --for N`。
+- **`request` 报“没有可用的图形界面”**：用终端 `sudo -v`（仅基础窗口）或
+  `sudo-elevation grant --for N --reason "..."`（终端审批任意时长，见 `grant --help`）。
 - **恢复任务**：systemd 用 `systemd-run`；WSL/容器用后台 `setsid` 进程；
   `status` 会显示当前机制，`lock`/重装会自动清理残留配置。
+- **卸载 headless 注意**：无有效 timestamp、无 GUI、无 tty 时，`sudo-elevation uninstall`（经 `sudo -A`）
+  必然失败，请在有 tty 的终端用 `sudo` 密码执行卸载。
+- **`lock` 报恢复失败**：多为无有效 timestamp（如刚 `sudo -k`）；限时租约可等定时恢复或重授权覆盖，
+  `until-lock`（`-1`）必须在 tty 补 `lock`，否则配置一直是无限。
 
 ## License
 
