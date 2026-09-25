@@ -24,6 +24,7 @@ INSTALLED_MODE=0
 PREFIX=""
 TARGET_USER=""
 EXPLICIT=0
+KEEP=0
 BASE_SPEC="15m"
 MAX_SPEC="365d"
 DRY=0
@@ -52,6 +53,28 @@ mk_dir() {
 	fi
 }
 
+# chown a home-relative chain (each component, non-recursive) to the home
+# owner. System installs also drop a skill file into the target user's home;
+# a root-made ~/.config/opencode/... chain would otherwise stay root-owned
+# and break later user-owned installs (or the user's own desktop apps).
+se_chown_home_chain() { # user home dir
+	local user=$1 home=$2 dir=$3 rest comp d
+	[ -n "$user" ] && [ -n "$home" ] && [ -n "$dir" ] || return 0
+	case "$dir" in
+		"$home"/*) rest=${dir#"$home"/} ;;
+		*) return 0 ;;
+	esac
+	[ -n "$rest" ] || return 0
+	d=$home
+	while [ -n "$rest" ]; do
+		comp=${rest%%/*}
+		if [ "$rest" = "$comp" ]; then rest=""; else rest=${rest#*/}; fi
+		d="$d/$comp"
+		[ -e "$d" ] || break
+		chown "$user" "$d" 2>/dev/null || true
+	done
+}
+
 usage() {
 	cat <<'EOF'
 usage: sudo ./install.sh [options]
@@ -68,8 +91,9 @@ options:
   --no-system           never touch system directories (sudoers drop-in,
                         sudo.conf marker, /usr/local, /etc, /run, /var/log);
                         without --prefix this implies the --user-install
-                        layout for the target user (root included), printing
-                        the exact root snippet for an admin instead.
+                        layout for the target user at install time (root
+                        included), printing the exact root snippet for an
+                        admin instead. Uninstall follows the manifest layout.
                         Without the snippet applied the tool stays inert.
   --skill-dir DIR       override opencode skill directory
   --no-skill            do not install the opencode skill
@@ -80,11 +104,14 @@ options:
   --uninstall           remove software but keep config (sudoers at base window,
                         sudo.conf marker, config, manifest, skill, audit log)
                         bare --uninstall is interactive (lists every install,
-                        asks per tree); any extra flag means automatic mode
+                        asks per tree); with --purge/--keep/--dry-run,
+                        --user-install/--no-system/--prefix/--user/--skill-dir
+                        it runs automatic (script-safe) instead
   --keep                with --uninstall: explicit keep (automatic, no prompts)
-  --purge               with --uninstall: remove config and ALL data too,
-                        including files for users missing from the manifest
-                        (use when the old data itself is suspect)
+  --purge               with --uninstall: remove config and our own data too;
+                        foreign/admin files sharing names are preserved
+                        (backups by strict shape, sudoers by marker header,
+                        leases by keys, skill by marker, odd CONFIG/LOG kept)
   --version             print version
   --help                this help
 EOF
@@ -92,25 +119,26 @@ EOF
 
 while [ $# -gt 0 ]; do
 	case "$1" in
-		--user) TARGET_USER=${2-}; EXPLICIT=1; shift 2 ;;
-		--base-timeout) BASE_SPEC=${2-}; EXPLICIT=1; shift 2 ;;
-		--max-timeout) MAX_SPEC=${2-}; EXPLICIT=1; shift 2 ;;
-		--prefix) PREFIX=${2-}; EXPLICIT=1; shift 2 ;;
+		--user) [ $# -ge 2 ] || die "--user needs a value"; TARGET_USER=$2; EXPLICIT=1; shift 2 ;;
+		--base-timeout) [ $# -ge 2 ] || die "--base-timeout needs a value"; BASE_SPEC=$2; shift 2 ;;
+		--max-timeout) [ $# -ge 2 ] || die "--max-timeout needs a value"; MAX_SPEC=$2; shift 2 ;;
+		--prefix) [ $# -ge 2 ] || die "--prefix needs a value"; PREFIX=$2; EXPLICIT=1; shift 2 ;;
 		--user-install) USER_INSTALL=1; EXPLICIT=1; shift ;;
 		--no-system) NO_SYSTEM=1; EXPLICIT=1; shift ;;
-		--skill-dir) SKILL_DIR=${2-}; EXPLICIT=1; shift 2 ;;
-		--no-skill) DO_SKILL=0; EXPLICIT=1; shift ;;
-		--test-hooks) TEST_HOOKS=1; EXPLICIT=1; shift ;;
+		--skill-dir) [ $# -ge 2 ] || die "--skill-dir needs a value"; SKILL_DIR=$2; EXPLICIT=1; shift 2 ;;
+		--no-skill) DO_SKILL=0; shift ;;
+		--test-hooks) TEST_HOOKS=1; shift ;;
 		--dry-run|-n) DRY=1; EXPLICIT=1; shift ;;
-		--force|-f) FORCE=1; EXPLICIT=1; shift ;;
+		--force|-f) FORCE=1; shift ;;
 		--uninstall) ACTION=uninstall; shift ;;
 		--purge) PURGE=1; EXPLICIT=1; shift ;;
-		--keep) EXPLICIT=1; shift ;;
+		--keep) KEEP=1; EXPLICIT=1; shift ;;
 		--version) printf '%s\n' "$VERSION"; exit 0 ;;
 		--help|-h) usage; exit 0 ;;
 		*) die "unknown option: $1 (try --help)" ;;
 	esac
 done
+[ "$PURGE" = 1 ] && [ "$KEEP" = 1 ] && die "--keep cannot be combined with --purge"
 
 [ -n "$TARGET_USER" ] || TARGET_USER=${SUDO_USER:-$(id -un)}
 id "$TARGET_USER" >/dev/null 2>&1 || die "no such user: $TARGET_USER"
@@ -319,6 +347,9 @@ install_skill() {
 		return 0
 	fi
 	mkdir -p "$dir"
+	# Fix the whole home-relative chain, not just the leaf: intermediate
+	# dirs made by root would otherwise poison later user-owned installs.
+	se_chown_home_chain "$TARGET_USER" "$home" "$dir"
 	# '|' delimiter plus '&' escape: future English duration text must not
 	# break the substitution even if it ever contains '/' or '&'.
 	esc_base=$(printf '%s' "$base_human_en" | sed -e 's/[&|\\]/\\&/g')
@@ -420,6 +451,10 @@ do_install() {
 		printf 'LIBEXECDIR=%s\n' "$SE_LIBEXEC"
 		printf 'SHAREDIR=%s\n' "$SE_SHARE"
 		printf 'CONFIG=%s\n' "$SE_CONFIG"
+		printf 'SUDO_CONF=%s\n' "$SE_SUDO_CONF"
+		printf 'SUDOERS_DIR=%s\n' "$SE_SUDOERS_DIR"
+		printf 'RUNTIME_DIR=%s\n' "$SE_RUNTIME_DIR"
+		printf 'LOG=%s\n' "$SE_LOG"
 		if [ "$DO_SKILL" = 1 ]; then
 			printf 'SKILL_DIR=%s\n' "${SKILL_DIR:-$(se_home_of "$TARGET_USER")/.config/opencode/skill/sudo-elevation}"
 		fi
@@ -467,11 +502,14 @@ write_receipt() {
 	fi
 	tmp=$(mktemp)
 	{
-		printf '# Managed by sudo-elevation install.sh --user-install.\n'
 		printf 'SUDO_ELEVATION_BINDIR=%s\n' "$SE_BIN_DIR"
 		printf 'SUDO_ELEVATION_LIBEXECDIR=%s\n' "$SE_LIBEXEC"
 		printf 'SUDO_ELEVATION_SHAREDIR=%s\n' "$SE_SHARE"
 		printf 'SUDO_ELEVATION_CONFIG=%s\n' "$SE_CONFIG"
+		printf 'SUDO_ELEVATION_SUDO_CONF=%s\n' "$SE_SUDO_CONF"
+		printf 'SUDO_ELEVATION_SUDOERS_DIR=%s\n' "$SE_SUDOERS_DIR"
+		printf 'SUDO_ELEVATION_RUNTIME_DIR=%s\n' "$SE_RUNTIME_DIR"
+		printf 'SUDO_ELEVATION_LOG=%s\n' "$SE_LOG"
 	} > "$tmp"
 	mk_dir "$dir"
 	run se_install_file "$tmp" "$target" 0644
@@ -479,6 +517,7 @@ write_receipt() {
 	if [ "$(id -u)" = 0 ]; then
 		chown "$TARGET_USER" "$target" 2>/dev/null || true
 		chown "$TARGET_USER" "$dir" 2>/dev/null || true
+		se_chown_home_chain "$TARGET_USER" "$home" "$dir"
 	fi
 	say "installed receipt: $target"
 }
@@ -597,12 +636,16 @@ T_MANIFEST=()
 T_INSTALLER=()
 T_FLAGS=()
 T_USERS=()
+T_PRIMARY=()
 T_INFO=()
 T_ROOT=()
 ORPHANS=()
 
 discover_add_tree() { # manifest-path
 	local mf=$1 m i
+	if command -v readlink >/dev/null 2>&1; then
+		mf=$(readlink -f "$mf" 2>/dev/null || printf '%s' "$mf")
+	fi
 	for ((i = 0; i < T_N; i++)); do
 		[ "${T_MANIFEST[$i]}" = "$mf" ] && return 0
 	done
@@ -618,9 +661,10 @@ discover_add_tree() { # manifest-path
 	[ -n "$bindir" ] || bindir=/usr/local/bin
 	[ -n "$libexec" ] || libexec=/usr/local/libexec/sudo-elevation
 	local installer="$libexec/install.sh" flags=""
-	[ -n "$prefix" ] && flags="--prefix $prefix"
+	if [ -n "$prefix" ]; then flags="--prefix '$prefix'"; fi
 	[ "$mode" = user ] && flags="$flags --user-install"
 	[ "$system" = 0 ] && flags="$flags --no-system"
+	if [ -n "$skdir" ]; then flags="$flags --skill-dir '$skdir'"; fi
 	flags=${flags# }
 	local label="${mode:-?} install"
 	[ "$mode" = user ] && label="user install (${users:-?})"
@@ -628,7 +672,8 @@ discover_add_tree() { # manifest-path
 	local info="users=${users:-?}"
 	[ -f "$bindir/sudo-elevation" ] || info="$info payload-missing"
 	if [ -n "$skdir" ] && [ -f "$skdir/SKILL.md" ]; then info="$info skill=yes"; fi
-	local u slug lease minutes reason
+	local u slug lease minutes reason rtdir
+	rtdir=$(se_read_kv "$mf" RUNTIME_DIR || true)
 	for u in $(printf '%s' "${users:-},${TARGET_USER:-}" | tr ',' ' '); do
 		[ -n "$u" ] || continue
 		slug=$(printf '%s' "$u" | tr -c 'A-Za-z0-9_-' '_')
@@ -637,6 +682,14 @@ discover_add_tree() { # manifest-path
 			minutes=$(se_read_kv "$lease" minutes || true)
 			reason=$(se_read_kv "$lease" reason || true)
 			info="$info lease($u)=${minutes:-?}${reason:+:$reason}"
+		fi
+		if [ -n "$rtdir" ] && [ "$rtdir" != /run/sudo-elevation ]; then
+			lease="$rtdir/$slug.lease"
+			if [ -f "$lease" ] && [ -r "$lease" ]; then
+				minutes=$(se_read_kv "$lease" minutes || true)
+				reason=$(se_read_kv "$lease" reason || true)
+				info="$info lease($u)=${minutes:-?}${reason:+:$reason}"
+			fi
 		fi
 		if [ -n "${SUDO_ELEVATION_PREFIX:-}" ]; then
 			lease="$SUDO_ELEVATION_PREFIX/run/sudo-elevation/$slug.lease"
@@ -649,11 +702,14 @@ discover_add_tree() { # manifest-path
 	done
 	local need_root=0
 	[ "$system" != 0 ] && [ -z "$prefix" ] && need_root=1
+	local primary=${users%%,*}
+	[ -n "$primary" ] || primary=$TARGET_USER
 	T_LABEL+=("$label")
 	T_MANIFEST+=("$mf")
 	T_INSTALLER+=("$installer")
 	T_FLAGS+=("$flags")
 	T_USERS+=("$users")
+	T_PRIMARY+=("$primary")
 	T_INFO+=("$info")
 	T_ROOT+=("$need_root")
 	T_N=$((T_N + 1))
@@ -666,6 +722,7 @@ discover_scan() {
 	T_INSTALLER=()
 	T_FLAGS=()
 	T_USERS=()
+	T_PRIMARY=()
 	T_INFO=()
 	T_ROOT=()
 	ORPHANS=()
@@ -696,12 +753,27 @@ discover_scan() {
 }
 
 # Traces with no covering manifest (best effort; unreadable dirs just skip).
+# A sudo.conf marker is only orphaned when no tree actually manages that
+# file (a SYSTEM=1 non-prefix tree covers the default sudo.conf).
 discover_orphans() {
-	local g covered u i
+	local g covered u i manages_conf=0
 	covered=" "
 	for ((i = 0; i < T_N; i++)); do
 		covered="$covered$(printf '%s' "${T_USERS[$i]}" | tr ',' ' ') "
 	done
+	if [ -f "$SE_SUDO_CONF" ] && grep -q '^# >>> sudo-elevation >>>' "$SE_SUDO_CONF" 2>/dev/null; then
+		for ((i = 0; i < T_N; i++)); do
+			if [ "$(se_read_kv "${T_MANIFEST[$i]}" SUDO_CONF || true)" = "$SE_SUDO_CONF" ]; then
+				manages_conf=1
+			elif [ -z "$(se_read_kv "${T_MANIFEST[$i]}" SUDO_CONF || true)" ] \
+				&& [ "$(se_read_kv "${T_MANIFEST[$i]}" SYSTEM || true)" != 0 ] \
+				&& [ -z "$(se_read_kv "${T_MANIFEST[$i]}" PREFIX || true)" ] \
+				&& [ "$SE_SUDO_CONF" = /etc/sudo.conf ]; then
+				manages_conf=1
+			fi
+		done
+		[ "$manages_conf" = 0 ] && ORPHANS+=("sudo.conf marker in $SE_SUDO_CONF with no known install")
+	fi
 	for g in "$SE_SUDOERS_DIR"/90-sudo-elevation-*; do
 		[ -e "$g" ] || continue
 		u=$(basename "$g")
@@ -713,23 +785,24 @@ discover_orphans() {
 			ORPHANS+=("sudoers orphan: $g")
 		fi
 	done
-	if [ -f "$SE_SUDO_CONF" ] && grep -q '^# >>> sudo-elevation >>>' "$SE_SUDO_CONF" 2>/dev/null; then
-		if [ "$T_N" = 0 ]; then
-			ORPHANS+=("sudo.conf marker in $SE_SUDO_CONF with no known install")
-		fi
-	fi
 }
 
 tree_replay() { # idx [purge: 0|1] -> printable command
-	local i=$1 p=${2:-0} cmd
+	local i=$1 p=${2:-0} cmd pre
 	if [ -f "${T_INSTALLER[$i]}" ]; then
-		cmd="sudo \"${T_INSTALLER[$i]}\" --uninstall"
+		cmd="\"${T_INSTALLER[$i]}\" --uninstall"
 	else
-		cmd="sudo ./install.sh (repo checkout) --uninstall"
+		cmd="./install.sh (repo checkout) --uninstall"
 	fi
 	[ -n "${T_FLAGS[$i]}" ] && cmd="$cmd ${T_FLAGS[$i]}"
-	[ "$p" = 1 ] && cmd="$cmd --purge"
-	printf '%s' "$cmd"
+	[ -n "${T_PRIMARY[$i]}" ] && cmd="$cmd --user '${T_PRIMARY[$i]}'"
+	[ "$p" = 1 ] && cmd="$cmd --purge" || cmd="$cmd --keep"
+	if [ "${T_ROOT[$i]}" = 1 ]; then
+		pre="sudo "
+	else
+		pre=""
+	fi
+	printf '%s%s' "$pre" "$cmd"
 }
 
 do_list_uninstalls() {
@@ -762,15 +835,13 @@ do_list_uninstalls() {
 
 do_interactive_uninstall() {
 	# Probe in a subshell: a failed exec-redirection reports through the
-	# shell itself, ignoring our 2>/dev/null.
+	# shell itself, ignoring our 2>/dev/null. Never hold /dev/tty open on a
+	# persistent fd: that breaks stderr capture under script(1)-style ptys,
+	# so every prompt below opens /dev/tty for that single read instead.
 	if ! (exec 3<>/dev/tty) 2>/dev/null; then
 		do_list_uninstalls
 		return $?
 	fi
-	exec 3<>/dev/tty 2>/dev/null || {
-		do_list_uninstalls
-		return $?
-	}
 	discover_scan
 	if [ "$T_N" = 0 ] && [ "${#ORPHANS[@]}" = 0 ]; then
 		say "nothing installed: no manifests or traces found."
@@ -798,11 +869,18 @@ do_interactive_uninstall() {
 			return 1
 		fi
 	fi
-	local ans kept=0 purged=0 skipped=0
+	local ans kept=0 purged=0 skipped=0 rc
 	for ((i = 0; i < T_N; i++)); do
 		printf '[%s] keep / purge / skip? [s] (5min timeout): ' "${T_LABEL[$i]}" >&2
-		if ! read -r -t 300 ans <&3; then
-			say "timed out; skipping." >&2
+		if read -r -t 300 ans </dev/tty; then
+			:
+		else
+			rc=$?
+			if [ "$rc" -gt 128 ]; then
+				say "timed out; skipping." >&2
+			else
+				say "no input; skipping." >&2
+			fi
 			skipped=$((skipped + 1))
 			continue
 		fi
@@ -836,7 +914,7 @@ do_interactive_uninstall() {
 # Run one discovered tree's own uninstaller. Never prompts (timestamp
 # already valid or tree needs no root); returns nonzero on failure.
 tree_do_uninstall() { # idx purge(0|1)
-	local i=$1 p=$2 inst mf mode system prefix
+	local i=$1 p=$2 inst mf mode system prefix skdir primary
 	inst="${T_INSTALLER[$i]}"
 	mf="${T_MANIFEST[$i]}"
 	[ -f "$inst" ] || {
@@ -850,9 +928,13 @@ tree_do_uninstall() { # idx purge(0|1)
 	prefix=$(se_read_kv "$mf" PREFIX || true)
 	mode=$(se_read_kv "$mf" INSTALL_MODE || true)
 	system=$(se_read_kv "$mf" SYSTEM || true)
+	skdir=$(se_read_kv "$mf" SKILL_DIR || true)
+	primary=${T_PRIMARY[$i]}
 	[ -n "$prefix" ] && args+=(--prefix "$prefix")
 	[ "$mode" = user ] && args+=(--user-install)
 	[ "$system" = 0 ] && args+=(--no-system)
+	[ -n "$skdir" ] && args+=(--skill-dir "$skdir")
+	[ -n "$primary" ] && args+=(--user "$primary")
 	if [ "${T_ROOT[$i]}" = 1 ] && [ "$(id -u)" != 0 ]; then
 		sudo -n "$inst" "${args[@]}"
 	else
@@ -861,12 +943,13 @@ tree_do_uninstall() { # idx purge(0|1)
 }
 
 # Warn when the manifest's recorded layout disagrees with the requested one
-# (e.g. XDG drift between install and uninstall). Advisory only.
+# (e.g. XDG drift between install and uninstall). Advisory only: execution
+# still uses the requested paths.
 check_manifest_layout() {
 	[ "$USER_INSTALL" = 1 ] || return 0
 	[ -f "$SE_SHARE/manifest" ] || return 0
 	local k want got
-	for k in BINDIR LIBEXECDIR SHAREDIR CONFIG; do
+	for k in BINDIR LIBEXECDIR SHAREDIR CONFIG SUDO_CONF SUDOERS_DIR RUNTIME_DIR LOG; do
 		want=$(se_read_kv "$SE_SHARE/manifest" "$k" || true)
 		[ -n "$want" ] || continue
 		case "$k" in
@@ -874,6 +957,10 @@ check_manifest_layout() {
 			LIBEXECDIR) got=$SE_LIBEXEC ;;
 			SHAREDIR) got=$SE_SHARE ;;
 			CONFIG) got=$SE_CONFIG ;;
+			SUDO_CONF) got=$SE_SUDO_CONF ;;
+			SUDOERS_DIR) got=$SE_SUDOERS_DIR ;;
+			RUNTIME_DIR) got=$SE_RUNTIME_DIR ;;
+			LOG) got=$SE_LOG ;;
 		esac
 		if [ "$want" != "$got" ]; then
 			say "warning: manifest $k=$want differs from requested $got; using requested" >&2
@@ -913,7 +1000,7 @@ do_uninstall() {
 	[ "$NO_SYSTEM" = 1 ] && SYS_OK=0
 
 	if [ "$PURGE" = 1 ]; then
-		say "uninstall --purge: removing config and ALL sudo-elevation data (no mercy)"
+		say "uninstall --purge: removing config and our own data (foreign files preserved)"
 	else
 		say "uninstall: removing software, keeping config (add --purge to delete everything)"
 	fi
@@ -980,11 +1067,11 @@ do_uninstall() {
 		say "sudo-elevation: 软件已卸载，配置保留（sudoers 基窗/marker/配置/manifest/skill/审计）"
 		say "sudo-elevation: 需要删干净时用 --purge；sudo -A 在重装前不可用（askpass 已删），普通 sudo 不受影响"
 		if [ "$DRY" != 1 ]; then
-			local replay="--uninstall --purge"
-			[ -n "$PREFIX" ] && replay="$replay --prefix $PREFIX"
+			local replay="--uninstall --purge --user '$TARGET_USER'"
+			[ -n "$PREFIX" ] && replay="$replay --prefix '$PREFIX'"
 			[ "$USER_INSTALL" = 1 ] && replay="$replay --user-install"
 			[ "$NO_SYSTEM" = 1 ] && replay="$replay --no-system"
-			[ -n "$SKILL_DIR" ] && replay="$replay --skill-dir $SKILL_DIR"
+			[ -n "$SKILL_DIR" ] && replay="$replay --skill-dir '$SKILL_DIR'"
 			say "sudo-elevation: 二次 purge 命令: sudo ./install.sh $replay  (需仓库 checkout)"
 		fi
 		[ "$SYS_OK" = 1 ] || print_uninstall_snippet

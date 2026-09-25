@@ -1,7 +1,7 @@
 #!/bin/bash
-# Uninstall in two modes (repo-flag path covered by run-host):
-#   keep (default): payload gone, config kept, lease ended, sudo stays usable;
-#   purge: everything gone including ghosts (suspect data included).
+# Uninstall in two modes (explicit flags = automatic, script-safe):
+#   keep: payload gone, config kept, lease ended, sudo stays usable;
+#   purge: own traces gone (foreign files preserved), ghosts by content.
 set -euo pipefail
 . /src/tests/docker/lib.sh
 

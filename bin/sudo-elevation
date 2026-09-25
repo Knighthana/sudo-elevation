@@ -25,12 +25,11 @@ commands:
   grant   --for <duration> [--reason TEXT]   approve a lease from a terminal (headless)
   status [--porcelain]                       show active lease and base window
   lock                                       revoke sudo cache and restore base window
-  uninstall [--purge]                      remove software but keep config (--purge deletes everything)
-                                             bare uninstall is interactive (lists every install, asks per tree);
-                                             any flag means automatic mode (fail-fast, never prompts)
-  uninstall --keep ...                       explicit keep, automatic mode (for scripts)
+  uninstall                            bare uninstall is interactive (lists every install, asks keep/purge/skip per tree)
+  uninstall [--keep|--purge] ...         explicit mode is automatic (for scripts, never prompts, fail-fast);
+                                         keep removes software but keeps config, purge also removes our own data
   uninstall --purge [--user-install] [--no-system] [--prefix DIR] [--user U] [--skill-dir D] [--dry-run]
-                                             automatic removal of one tree (manifest fills in the rest)
+                                         automatic removal of one tree (own data only, manifest fills in the rest)
   parse <duration>                           print minutes for a duration spec
   version                                    print version
 
@@ -250,24 +249,29 @@ EOF
 		printf 'sudo-elevation: 已撤销当前 sudo 缓存；配置将在定时恢复/下次授权时回到基础窗口（sudo 超时仍会保护）\n'
 		;;
   uninstall)
-		purge=()
 		fwd=()
 		explicit=0
 		explicit_ui=0
+		keep_seen=0
+		purge_seen=0
 		while [ $# -gt 0 ]; do
 			case "$1" in
-				--purge) purge=(--purge); fwd+=(--purge); explicit=1; shift ;;
-				--keep) fwd+=(--keep); explicit=1; shift ;;
+				--purge) fwd+=(--purge); explicit=1; purge_seen=1; shift ;;
+				--keep) fwd+=(--keep); explicit=1; keep_seen=1; shift ;;
 				--user-install) fwd+=(--user-install); explicit=1; explicit_ui=1; shift ;;
 				--no-system) fwd+=(--no-system); explicit=1; shift ;;
-				--prefix) fwd+=(--prefix "${2-}"); explicit=1; shift 2 ;;
-				--user) fwd+=(--user "${2-}"); explicit=1; shift 2 ;;
-				--skill-dir) fwd+=(--skill-dir "${2-}"); explicit=1; shift 2 ;;
+				--prefix) [ $# -ge 2 ] || { echo "uninstall: --prefix needs a value" >&2; exit 2; }; fwd+=(--prefix "$2"); explicit=1; shift 2 ;;
+				--user) [ $# -ge 2 ] || { echo "uninstall: --user needs a value" >&2; exit 2; }; fwd+=(--user "$2"); explicit=1; shift 2 ;;
+				--skill-dir) [ $# -ge 2 ] || { echo "uninstall: --skill-dir needs a value" >&2; exit 2; }; fwd+=(--skill-dir "$2"); explicit=1; shift 2 ;;
 				--dry-run|-n) fwd+=(--dry-run); explicit=1; shift ;;
 				-h|--help) usage; exit 0 ;;
 				*) echo "uninstall: unknown argument: $1" >&2; exit 2 ;;
 			esac
 		done
+		if [ "$keep_seen" = 1 ] && [ "$purge_seen" = 1 ]; then
+			echo "uninstall: --keep cannot be combined with --purge" >&2
+			exit 2
+		fi
 		installer="$SE_LIBEXEC/install.sh"
 		if [ ! -f "$installer" ]; then
 			echo "uninstall: $installer not found (install first, or run ./install.sh --uninstall from the repository)" >&2
@@ -306,13 +310,21 @@ EOF
 			fi
 		fi
 		if [ -n "${SUDO_ELEVATION_PREFIX:-}" ] && [ "$user_mode" = 0 ]; then
-			exec "$installer" --prefix "$SUDO_ELEVATION_PREFIX" --uninstall "${fwd[@]}" ${purge[@]+"${purge[@]}"}
-		elif ! sudo -n true 2>/dev/null; then
+			exec "$installer" --prefix "$SUDO_ELEVATION_PREFIX" --uninstall "${fwd[@]}"
+		fi
+		is_dry=0
+		for f in ${fwd[@]+"${fwd[@]}"}; do
+			[ "$f" = "--dry-run" ] && is_dry=1
+		done
+		if sudo -n true 2>/dev/null; then
+			exec sudo -n "$installer" --uninstall "${fwd[@]}"
+		elif [ "$is_dry" = 1 ]; then
+			echo "uninstall: no valid sudo timestamp; dry-run preview may be partial." >&2
+			exec "$installer" --uninstall "${fwd[@]}"
+		else
 			echo "uninstall (automatic): no valid sudo timestamp; run sudo -v first," >&2
 			echo "or run bare 'sudo-elevation uninstall' on a terminal for interactive removal." >&2
 			exit 1
-		else
-			exec sudo -n "$installer" --uninstall "${fwd[@]}" ${purge[@]+"${purge[@]}"}
 		fi
 		;;
 	parse)

@@ -55,7 +55,8 @@ sudo ./install.sh                 # 默认用户 $SUDO_USER，基础窗口 15m
 --max-timeout SPEC   单次可批准的最大时长，默认 365d（非长期构建机建议设小，如 12h/7d）
 --dry-run            只打印将要执行的操作，不改动系统
 --force              接管已存在的其他 Path askpass 配置
---uninstall [--purge] 卸载（--purge 连审计日志一起删）
+--uninstall [--purge] 卸载：裸命令是互动发现（列出并逐棵确认），带参进自动模式；
+  详见“卸载”节（`--keep/--user-install/--no-system/--prefix/--user/--skill-dir/--dry-run`）
 ```
 
 依赖：`bash`、`sudo` >= **1.8.21**（安装时强制校验——租约模型依赖 1.8.21 引入的
@@ -161,7 +162,7 @@ shellcheck + host 沙箱 + Docker 矩阵。
 
 ```bash
 sudo ./install.sh --user-install --user alice     # payload 进 ~/.local，配置进 ~/.config
-./install.sh --user-install --no-system           # 免 root 降级安装（仅用户文件，见下）
+./install.sh --no-system                       # 免 root 降级安装（自动进目标用户 XDG，同上）
 ```
 
 - 布局：可执行文件 `~/.local/bin`、libexec `~/.local/libexec`、数据 `~/.local/share`、
@@ -172,7 +173,9 @@ sudo ./install.sh --user-install --user alice     # payload 进 ~/.local，配�
 - `--no-system` 的含义就是不动任何系统目录（`/usr/local`、`/etc`、`/run`、
   `/var/log` 都不碰）：不带 `--prefix` 时自动采用目标用户的 XDG 布局，
   root 执行则装进 root 自己的家目录；卸载时按 manifest 记录的布局清理。
-- 卸载同样加 `--user-install`（CLI `uninstall` 按 manifest 自动转发）。
+- 卸载：CLI（`sudo-elevation uninstall`）按 manifest 自动补齐缺失 flags；
+  直接调 `install.sh --uninstall` 则布局 flags 需显式给全（`--user-install/--no-system/--prefix/--user/--skill-dir`），
+  只告警不自动补（`PREFIX` 不符会明确警告）。
 
 ## 卸载（包管理器式两档）
 
@@ -180,17 +183,19 @@ sudo ./install.sh --user-install --user alice     # payload 进 ~/.local，配�
 sudo-elevation uninstall              # 互动：列出所有安装并逐棵确认（keep/purge/skip），无 tty 时只列出
 sudo-elevation uninstall --purge      # 自动：无人值守，要求有效 sudo 时间戳（先 sudo -v），无提示
 sudo-elevation uninstall --keep       # 自动：显式 keep，供脚本使用（裸命令已改为互动）
-# 或在仓库目录: sudo ./install.sh --uninstall [--purge]（用户安装加 --user-install）
+# 或在仓库目录: sudo ./install.sh --uninstall [--keep|--purge] [--user-install] [--no-system] [--prefix DIR] [--user U] [--skill-dir D] [--dry-run]
+# （布局 flags 需显式，见上）
 ```
 
 - 带参即自动模式：零提示、失败即停（fail-fast，无密码提示挂起）；`--user-install/--no-system/--prefix/--user/--skill-dir/--dry-run`
-  可钉死单棵树，未给的按 manifest 自动补齐；`--dry-run` 即预览。
+  可钉死单棵树，CLI 未给的按 manifest 自动补齐（直接调 `install.sh` 需给全）；`--dry-run` 即预览，
+  无 timestamp 时降级为尽力预览并警告。
 - 不带参即互动模式：receipt + manifest + 系统痕迹三层发现，每棵展示模式/用户/租约/skill/备份与精确命令，
   当场确认；提示 5 分钟无应答按跳过；无 tty 时只列出并退出（需处理时返回码非零）。
 - `keep` 会删掉 CLI 与自带卸载器（manifest 保留），二次 purge 用当时打印的仓库命令
   （如 `sudo ./install.sh --user-install --uninstall --purge`，flags 已按 manifest 配好）。
-- 默认档结束所有活动租约（sudoers 回基窗、清缓存）后再删程序；`sudo -A` 在重装前不可用
-  （askpass 已删），普通 sudo 不受影响。
+- 默认档结束所有活动租约（`--no-system` 除外，只打印管理员 snippet；sudoers 回基窗、清缓存）后再删程序；
+  `sudo -A` 在重装前不可用（askpass 已删），普通 sudo 不受影响。
 - `--purge` 不保留自有旧数据（怀疑旧数据有害时用）：自建 `sudo.conf` 备份按 manifest 精确删除，
   旧版残留备份只删严格自有格式（`bak.YYYYMMDDHHMMSS[.PID]`），管理员自有备份保留；
   `sudoers.d/90-sudo-elevation-*` 只删含 `Managed by sudo-elevation` 的自有渲染，手建同前缀文件保留并告警；

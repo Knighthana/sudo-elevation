@@ -50,7 +50,7 @@ for image in $IMAGES; do
 		fi
 		if [ "$rc" = 124 ]; then
 			docker rm -f "$ctr" >/dev/null 2>&1 || true
-			if grep -q 'SCENARIO-DONE' "$out"; then
+			if grep -q 'SCENARIO-DONE rc=0' "$out"; then
 				printf '  WARN: docker CLI hung after scenario completed (%ss elapsed)\n' "$elapsed"
 				rm -f "$out"
 				continue

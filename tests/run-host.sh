@@ -15,11 +15,15 @@ die() {
 	exit 1
 }
 log() { printf '\n== %s ==\n' "$*"; }
+# Sandbox CLI runner: SUDO_ELEVATION_PREFIX is set per-command (never
+# exported) so user-tree tests below cannot accidentally hit the wrong tree
+# when someone forgets env -u.
+se() { env SUDO_ELEVATION_PREFIX="$SB/root" "$@"; }
 
 log "syntax check"
 for f in install.sh bin/sudo-askpass bin/sudo-elevation \
 	libexec/sudo-elevation/grant libexec/sudo-elevation/restore \
-	libexec/sudo-elevation/common.sh; do
+	libexec/sudo-elevation/common.sh tests/manual/lock-tty.sh; do
 	bash -n "$REPO/$f"
 done
 ok "all scripts parse"
@@ -71,12 +75,11 @@ bash -c '
 ok "version compare"
 
 log "installed CLI works with prefix"
-export SUDO_ELEVATION_PREFIX="$SB/root"
 SE="$SB/root/usr/local/bin/sudo-elevation"
-[ "$("$SE" version)" = "sudo-elevation $(cat "$REPO/VERSION")" ] || die "bad version"
-[ "$("$SE" parse 90s)" = "1.5" ] || die "bad parse"
-[ "$("$SE" parse 1d)" = "1440" ] || die "bad parse"
-status_out=$("$SE" status)
+[ "$(se "$SE" version)" = "sudo-elevation $(cat "$REPO/VERSION")" ] || die "bad version"
+[ "$(se "$SE" parse 90s)" = "1.5" ] || die "bad parse"
+[ "$(se "$SE" parse 1d)" = "1440" ] || die "bad parse"
+status_out=$(se "$SE" status)
 grep -q '无活动租约' <<<"$status_out" || die "bad status"
 ok "CLI works"
 
@@ -88,7 +91,7 @@ mkdir -p "$(dirname "$lease")"
 start=$(($(date +%s) - 1800))
 printf 'epoch=%s-5000-7\nuser=%s\nminutes=60\ngranted_at=test\nreason=test\nrestore=none\n' \
 	"$start" "$ME" > "$lease"
-status_out=$("$SE" status)
+status_out=$(se "$SE" status)
 grep -qF '活动租约' <<<"$status_out" || die "lease not reported: $status_out"
 grep -qF '已到期' <<<"$status_out" && die "active lease reported as expired: $status_out"
 grep -qE '剩余: 30(\.0)? 分钟' <<<"$status_out" || die "bad remaining time: $status_out"
@@ -152,8 +155,7 @@ grep -qF 'do not loop requests' "$SB/skill/SKILL.md" || die "skill missing gone-
 ok "skill English"
 
 log "status --porcelain (no lease)"
-export SUDO_ELEVATION_PREFIX="$SB/root"
-porc=$("$SE" status --porcelain)
+porc=$(se "$SE" status --porcelain)
 grep -qF 'active=0' <<<"$porc" || die "porcelain inactive: $porc"
 grep -qF 'base_minutes=15' <<<"$porc" || die "porcelain base: $porc"
 ok "porcelain inactive"
@@ -171,8 +173,8 @@ bash -c '
 	se_parse_minutes 1m30s >/dev/null 2>&1 && exit 1
 	exit 0
 ' _ "$REPO" "$SB" || die "strict config/human"
-if "$SE" parse 1m30s >/dev/null 2>&1; then die "parse 1m30s accepted"; fi
-out=$("$SE" parse 1m30s 2>&1 || true)
+if se "$SE" parse 1m30s >/dev/null 2>&1; then die "parse 1m30s accepted"; fi
+out=$(se "$SE" parse 1m30s 2>&1 || true)
 grep -qF '90s' <<<"$out" || die "composite hint missing: $out"
 ok "strict config"
 
@@ -213,8 +215,8 @@ command -v getent >/dev/null || die "getent missing"
 [ -x /usr/bin/getent ] || die "expected getent at /usr/bin/getent"
 printf '#!/bin/sh\necho hi\n' > "$FAKEHOME/unrelated-tool"
 printf 'third party without marker\n' > "$FAKEHOME/foreign-skill.md"
-# NOTE: SUDO_ELEVATION_PREFIX must be empty here (it is exported globally for
-# the prefix-sandbox tests); user installs are receipt-located, not prefixed.
+# NOTE: SUDO_ELEVATION_PREFIX is intentionally unset here (the se() helper
+# scopes it per-command); user installs are receipt-located, not prefixed.
 env -u SUDO_ELEVATION_PREFIX PATH="$SB/fakebin:$PATH" HOME="$FAKEHOME" "$REPO/install.sh" --user-install --user "$ME" --no-system --skill-dir "$FAKEHOME/skill" >/dev/null
 [ -f "$FAKEHOME/.local/bin/sudo-elevation" ] || die "no-system payload missing"
 [ -f "$FAKEHOME/.config/sudo-elevation/config" ] || die "no-system config missing"
@@ -269,7 +271,9 @@ grep -q 'Defaults lecture' "$NSR/etc/sudo.conf" || die "prefix sudo.conf foreign
 ok "prefix no-system skips system files"
 
 log "keep uninstall via CLI (prefix sandbox, no sudo needed)"
-"$SE" uninstall --keep >/dev/null
+start=$(($(date +%s) - 60))
+printf 'epoch=%s-1-1\nuser=%s\nminutes=15\nrestore=none\n' "$start" "$ME" > "$SB/root/run/sudo-elevation/$ME.lease"
+se "$SE" uninstall --keep >/dev/null
 for f in usr/local/bin/sudo-askpass usr/local/bin/sudo-elevation \
 	usr/local/libexec/sudo-elevation/grant usr/local/libexec/sudo-elevation/install.sh \
 	usr/local/libexec/sudo-elevation/restore; do
@@ -281,7 +285,8 @@ for f in etc/sudo-elevation.conf etc/sudoers.d/90-sudo-elevation-"$ME" \
 done
 [ -f "$SB/skill/SKILL.md" ] || die "skill should be kept"
 grep -q 'sudo-elevation' "$SB/root/etc/sudo.conf" || die "marker should be kept"
-ok "keep: payload gone, config kept"
+[ ! -e "$SB/root/run/sudo-elevation/$ME.lease" ] || die "keep left lease behind"
+ok "keep: payload gone, config kept, lease ended"
 
 log "purge uninstall removes everything"
 "$REPO/install.sh" --prefix "$SB/root" --user "$ME" --skill-dir "$SB/skill" --uninstall --purge >/dev/null
@@ -299,30 +304,81 @@ ok "purge clean"
 
 log "bare uninstall without tty only lists (exit 2, nothing removed)"
 "$REPO/install.sh" --prefix "$SB/ilist" --user "$ME" --skill-dir "$SB/iskill" >/dev/null
-if SUDO_ELEVATION_PREFIX="$SB/ilist" "$REPO/install.sh" --uninstall </dev/null >/tmp/se-list.log 2>&1; then
-	die "list-only should exit nonzero when action is needed"
-fi
-grep -qF "$SB/ilist/usr/local/share/sudo-elevation/manifest" /tmp/se-list.log \
-	|| die "list missed sandbox tree: $(cat /tmp/se-list.log)"
-grep -q "nothing was removed" /tmp/se-list.log || die "list must state nothing removed"
+rc=0
+SUDO_ELEVATION_PREFIX="$SB/ilist" "$REPO/install.sh" --uninstall </dev/null >"$SB/se-list.log" 2>&1 || rc=$?
+[ "$rc" -eq 2 ] || die "list-only should exit 2, got $rc"
+grep -qF "$SB/ilist/usr/local/share/sudo-elevation/manifest" "$SB/se-list.log" \
+	|| die "list missed sandbox tree: $(cat "$SB/se-list.log")"
+grep -q "nothing was removed" "$SB/se-list.log" || die "list must state nothing removed"
+grep -q "^    keep: " "$SB/se-list.log" || die "list must print keep replay"
+grep -q "^    purge: " "$SB/se-list.log" || die "list must print purge replay"
+grep -qF -- "--prefix '$SB/ilist'" "$SB/se-list.log" || die "replay must carry --prefix"
 [ -f "$SB/ilist/usr/local/bin/sudo-elevation" ] || die "list-only removed payload"
 ok "list-only safe"
 
-log "bare uninstall on a pty asks per tree (skip keeps everything)"
-if ! command -v script >/dev/null 2>&1; then
-	die "script(1) missing for pty test"
-fi
-printf 's\n' | script -qec "env SUDO_ELEVATION_PREFIX='$SB/ilist' '$REPO/install.sh' --uninstall" /dev/null >/tmp/se-pty.log 2>&1 || true
-grep -q "skipped=1" /tmp/se-pty.log || die "pty skip summary missing: $(cat /tmp/se-pty.log)"
-[ -f "$SB/ilist/usr/local/bin/sudo-elevation" ] || die "pty skip removed payload"
-ok "interactive skip safe"
+log "manifest records full layout keys"
+for k in VERSION BASE_MINUTES MAX_MINUTES USERS INSTALL_MODE SYSTEM SUDO_CONF_BAK PREFIX \
+	BINDIR LIBEXECDIR SHAREDIR CONFIG SUDO_CONF SUDOERS_DIR RUNTIME_DIR LOG SKILL_DIR; do
+	grep -q "^$k=" "$SB/ilist/usr/local/share/sudo-elevation/manifest" || die "manifest lacks $k"
+done
+grep -q "^PREFIX=$SB/ilist$" "$SB/ilist/usr/local/share/sudo-elevation/manifest" \
+	|| die "manifest PREFIX wrong"
+ok "manifest full keys"
 
-log "bare uninstall on a pty answers keep (payload gone, config kept)"
-printf 'k\n' | script -qec "env SUDO_ELEVATION_PREFIX='$SB/ilist' '$REPO/install.sh' --uninstall" /dev/null >/tmp/se-pty2.log 2>&1 || true
-grep -q "kept=1" /tmp/se-pty2.log || die "pty keep summary missing: $(cat /tmp/se-pty2.log)"
-[ ! -e "$SB/ilist/usr/local/bin/sudo-elevation" ] || die "pty keep left payload"
-[ -f "$SB/ilist/usr/local/share/sudo-elevation/manifest" ] || die "pty keep removed manifest"
-grep -q "install.sh.*--uninstall --purge" /tmp/se-pty2.log || die "keep must print purge replay"
-ok "interactive keep works"
+log "prefix mismatch warns and only touches the requested tree"
+cp -r "$SB/ilist" "$SB/other"
+"$REPO/install.sh" --prefix "$SB/other" --user "$ME" --skill-dir "$SB/otherskill" --uninstall --keep >"$SB/se-mismatch.log" 2>&1 \
+	|| die "mismatched uninstall failed"
+grep -q "manifest PREFIX=$SB/ilist differs" "$SB/se-mismatch.log" \
+	|| die "PREFIX mismatch warning missing: $(cat "$SB/se-mismatch.log")"
+[ -f "$SB/ilist/usr/local/bin/sudo-elevation" ] || die "mismatched uninstall touched tree A"
+[ ! -e "$SB/other/usr/local/bin/sudo-elevation" ] || die "mismatched uninstall missed tree B"
+ok "prefix mismatch safe"
+
+log "bare uninstall on a pty asks per tree (skip keeps everything)"
+if command -v script >/dev/null 2>&1; then
+	printf 's\n' | script -qec "env SUDO_ELEVATION_PREFIX='$SB/ilist' '$REPO/install.sh' --uninstall" /dev/null >"$SB/se-pty.log" 2>&1 || true
+	grep -q "skipped=1" "$SB/se-pty.log" || die "pty skip summary missing: $(cat "$SB/se-pty.log")"
+	[ -f "$SB/ilist/usr/local/bin/sudo-elevation" ] || die "pty skip removed payload"
+	ok "interactive skip safe"
+
+	log "bare uninstall on a pty answers keep (payload gone, config kept)"
+	printf 'k\n' | script -qec "env SUDO_ELEVATION_PREFIX='$SB/ilist' '$REPO/install.sh' --uninstall" /dev/null >"$SB/se-pty2.log" 2>&1 || true
+	grep -q "kept=1" "$SB/se-pty2.log" || die "pty keep summary missing: $(cat "$SB/se-pty2.log")"
+	[ ! -e "$SB/ilist/usr/local/bin/sudo-elevation" ] || die "pty keep left payload"
+	[ -f "$SB/ilist/usr/local/share/sudo-elevation/manifest" ] || die "pty keep removed manifest"
+	grep -q "install.sh.*--uninstall --purge" "$SB/se-pty2.log" || die "keep must print purge replay"
+	grep -qF -- "--prefix '$SB/ilist'" "$SB/se-pty2.log" || die "replay must carry --prefix"
+	grep -qF -- "--user '$ME'" "$SB/se-pty2.log" || die "replay must carry --user"
+	ok "interactive keep works"
+else
+	ok "pty tests skipped (no script(1))"
+fi
+
+log "install.sh --keep direct call keeps config without prompts"
+"$REPO/install.sh" --prefix "$SB/ilist" --user "$ME" --skill-dir "$SB/iskill" --uninstall --keep >/dev/null
+[ ! -e "$SB/ilist/usr/local/bin/sudo-elevation" ] || die "direct keep left payload"
+[ -f "$SB/ilist/usr/local/share/sudo-elevation/manifest" ] || die "direct keep removed manifest"
+ok "direct --keep works"
+
+log "automatic mode fails fast without timestamp (rc=1, nothing touched)"
+env -u SUDO_ELEVATION_PREFIX PATH="$SB/fakebin:$PATH" HOME="$FAKEHOME" "$REPO/install.sh" --user "$ME" --no-system --skill-dir "$SB/ffskill" >/dev/null
+rc=0
+HOME="$FAKEHOME" PATH="/usr/bin:/bin" "$FAKEHOME/.local/bin/sudo-elevation" uninstall --keep >"$SB/se-ff.log" 2>&1 || rc=$?
+[ "$rc" -eq 1 ] || die "fail-fast should exit 1, got $rc"
+grep -q "no valid sudo timestamp" "$SB/se-ff.log" || die "fail-fast message missing"
+[ -f "$FAKEHOME/.local/bin/sudo-elevation" ] || die "fail-fast removed payload"
+ok "fail-fast safe"
+
+log "leaked PREFIX does not hijack user trees"
+SUDO_ELEVATION_PREFIX="$SB/root" PATH="$SB/fakebin:$PATH" HOME="$FAKEHOME" "$FAKEHOME/.local/bin/sudo-elevation" uninstall --keep >"$SB/se-leak.log" 2>&1 \
+	|| die "leaked-PREFIX uninstall failed"
+[ ! -e "$FAKEHOME/.local/bin/sudo-elevation" ] || die "leaked PREFIX missed XDG tree"
+[ -f "$SB/ilist/usr/local/share/sudo-elevation/manifest" ] || die "leaked PREFIX touched sandbox tree"
+ok "user layout wins over leaked PREFIX"
+env -u SUDO_ELEVATION_PREFIX PATH="$SB/fakebin:$PATH" HOME="$FAKEHOME" "$REPO/install.sh" --user-install --user "$ME" --no-system --uninstall --purge >/dev/null
+[ ! -e "$FAKEHOME/.local/bin/sudo-elevation" ] || die "fakehome cleanup left payload"
+[ ! -e "$FAKEHOME/.local/share/sudo-elevation/manifest" ] || die "fakehome cleanup left manifest"
+[ ! -e "$FAKEHOME/.config/sudo-elevation/config" ] || die "fakehome cleanup left config"
 
 printf '\nHOST TESTS PASSED\n'

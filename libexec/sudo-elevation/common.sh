@@ -25,10 +25,12 @@ se_path() { printf '%s%s' "$SE_PREFIX" "$1"; }
 se_load_receipt() {
 	# $1 = probing flag: when 1, missing receipt is fine (normal case).
 	local receipt conf_home line key val
-	conf_home=${XDG_CONFIG_HOME:-$HOME/.config} 2>/dev/null || return 0
+	conf_home=${XDG_CONFIG_HOME:-${HOME:-}/.config}
+	[ -n "$conf_home" ] && [ "$conf_home" != /.config ] || return 0
 	receipt="$conf_home/sudo-elevation/env"
 	[ -f "$receipt" ] || return 0
 	while IFS= read -r line || [ -n "$line" ]; do
+		line=${line%$'\r'}
 		case "$line" in ''|'#'*) continue ;; esac
 		case "$line" in *=*) ;; *) continue ;; esac
 		key=${line%%=*}
@@ -200,6 +202,7 @@ se_read_kv() {
 	local file=${1-} want=${2-} line
 	[ -n "$file" ] && [ -n "$want" ] && [ -f "$file" ] || return 1
 	while IFS= read -r line || [ -n "$line" ]; do
+		line=${line%$'\r'}
 		case "$line" in
 			"$want="*) printf '%s' "${line#"$want="}"; return 0 ;;
 		esac

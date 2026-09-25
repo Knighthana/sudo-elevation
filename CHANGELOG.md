@@ -13,6 +13,14 @@
   purge 仓库命令（CLI 自删后仍可继续）；交互子调用带显式 flag，不会二次弹提示。
 - tests: 新增 `18_autouninstall`（list-only/fail-fast/自动 keep/pty 交互/回放 purge）；
   `06/16` 改用 `--keep`；host 增 list-only 与 pty 交互用例。
+- fix: 仅删自有（`3c8d0bf` 起）：安装剪枝只留最新自有 `bak.YYYYMMDDHHMMSS[.PID]`，
+  管理员备份永留；purge 按内容认定（sudoers `Managed by` 头、lease `epoch+minutes/restore` 键、
+  skill `sudo-elevation request` 标记、异形 `CONFIG/LOG` 与未闭合 marker 块保留并告警）。
+- fix: 裸 `--no-system` 安装时自动采用目标用户 XDG 布局（root 进 root 家），卸载按 manifest
+  清理；CLI 用户布局优先于残留 `SUDO_ELEVATION_PREFIX`。
+- fix: 交互发现每棵树透传 `--user/--skill-dir`，回放命令可粘贴；`--keep/--purge` 互斥报错；
+  缺值 flags 友好报错；`manifest`/`receipt` 补记 `SUDO_CONF/SUDOERS_DIR/RUNTIME_DIR/LOG`（漂移仅告警）；
+  家目录属主链安装即修正（root 代建不再毒化后续 user 安装）；`run.sh` 超时后要求 `SCENARIO-DONE rc=0`。
 
 ## 0.1.6 - 2026-09-24
 
