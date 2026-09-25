@@ -17,8 +17,16 @@ die() {
 log() { printf '\n== %s ==\n' "$*"; }
 # Sandbox CLI runner: SUDO_ELEVATION_PREFIX is set per-command (never
 # exported) so user-tree tests below cannot accidentally hit the wrong tree
-# when someone forgets env -u.
-se() { env SUDO_ELEVATION_PREFIX="$SB/root" "$@"; }
+# when someone forgets env -u. XDG_* are stripped too: install.sh honors the
+# caller's XDG_CONFIG_HOME/DATA_HOME when the target user is the caller
+# (install.sh:167-169), so a runner that sets them (e.g. actions/checkout
+# overriding HOME for global git config) would write outside our sandbox.
+se() { env -u XDG_CONFIG_HOME -u XDG_DATA_HOME -u XDG_STATE_HOME \
+	SUDO_ELEVATION_PREFIX="$SB/root" "$@"; }
+# Same idea for user-tree (non-prefix) sandboxes: neutral PREFIX and XDG,
+# then apply the caller's own env (HOME/PATH).
+se_user() { env -u SUDO_ELEVATION_PREFIX -u XDG_CONFIG_HOME -u XDG_DATA_HOME \
+	-u XDG_STATE_HOME "$@"; }
 
 log "syntax check"
 for f in install.sh bin/sudo-askpass bin/sudo-elevation \
@@ -215,9 +223,9 @@ command -v getent >/dev/null || die "getent missing"
 [ -x /usr/bin/getent ] || die "expected getent at /usr/bin/getent"
 printf '#!/bin/sh\necho hi\n' > "$FAKEHOME/unrelated-tool"
 printf 'third party without marker\n' > "$FAKEHOME/foreign-skill.md"
-# NOTE: SUDO_ELEVATION_PREFIX is intentionally unset here (the se() helper
-# scopes it per-command); user installs are receipt-located, not prefixed.
-env -u SUDO_ELEVATION_PREFIX PATH="$SB/fakebin:$PATH" HOME="$FAKEHOME" "$REPO/install.sh" --user-install --user "$ME" --no-system --skill-dir "$FAKEHOME/skill" >/dev/null
+# NOTE: se_user neutralizes SUDO_ELEVATION_PREFIX and XDG_* (see helper);
+# user installs are receipt-located, not prefixed.
+se_user PATH="$SB/fakebin:$PATH" HOME="$FAKEHOME" "$REPO/install.sh" --user-install --user "$ME" --no-system --skill-dir "$FAKEHOME/skill" >/dev/null
 [ -f "$FAKEHOME/.local/bin/sudo-elevation" ] || die "no-system payload missing"
 [ -f "$FAKEHOME/.config/sudo-elevation/config" ] || die "no-system config missing"
 [ -f "$FAKEHOME/.config/sudo-elevation/env" ] || die "no-system receipt missing"
@@ -228,7 +236,7 @@ mkdir -p "$FAKEHOME/skill-other"
 cp "$FAKEHOME/foreign-skill.md" "$FAKEHOME/skill-other/SKILL.md"
 # full CLI path (fake sudo stands in for privilege): manifest SYSTEM=0 must
 # forward --no-system so no root-owned system path is touched
-env -u SUDO_ELEVATION_PREFIX PATH="$SB/fakebin:$PATH" HOME="$FAKEHOME" "$FAKEHOME/.local/bin/sudo-elevation" uninstall --purge >/dev/null
+se_user PATH="$SB/fakebin:$PATH" HOME="$FAKEHOME" "$FAKEHOME/.local/bin/sudo-elevation" uninstall --purge >/dev/null
 [ ! -e "$FAKEHOME/.local/bin/sudo-elevation" ] || die "no-system purge left payload"
 [ ! -e "$FAKEHOME/.config/sudo-elevation/config" ] || die "no-system purge left config"
 [ ! -e "$FAKEHOME/.config/sudo-elevation/env" ] || die "no-system purge left receipt"
@@ -241,12 +249,12 @@ env -u SUDO_ELEVATION_PREFIX PATH="$SB/fakebin:$PATH" HOME="$FAKEHOME" "$FAKEHOM
 ok "no-system install/uninstall precise"
 
 log "bare --no-system implies user layout (never system dirs)"
-env -u SUDO_ELEVATION_PREFIX PATH="$SB/fakebin:$PATH" HOME="$FAKEHOME" "$REPO/install.sh" --user "$ME" --no-system --skill-dir "$FAKEHOME/skill2" >/dev/null
+se_user PATH="$SB/fakebin:$PATH" HOME="$FAKEHOME" "$REPO/install.sh" --user "$ME" --no-system --skill-dir "$FAKEHOME/skill2" >/dev/null
 grep -q '^INSTALL_MODE=user$' "$FAKEHOME/.local/share/sudo-elevation/manifest" || die "bare no-system not user mode"
 grep -q '^SYSTEM=0$' "$FAKEHOME/.local/share/sudo-elevation/manifest" || die "bare no-system SYSTEM!=0"
 [ -f "$FAKEHOME/.local/bin/sudo-elevation" ] || die "bare no-system payload missing"
 [ -f "$FAKEHOME/.config/sudo-elevation/config" ] || die "bare no-system config missing"
-env -u SUDO_ELEVATION_PREFIX PATH="$SB/fakebin:$PATH" HOME="$FAKEHOME" "$FAKEHOME/.local/bin/sudo-elevation" uninstall --purge >/dev/null
+se_user PATH="$SB/fakebin:$PATH" HOME="$FAKEHOME" "$FAKEHOME/.local/bin/sudo-elevation" uninstall --purge >/dev/null
 [ ! -e "$FAKEHOME/.local/bin/sudo-elevation" ] || die "bare no-system purge left payload"
 [ ! -e "$FAKEHOME/.local/share/sudo-elevation/manifest" ] || die "bare no-system purge left manifest"
 [ -f "$FAKEHOME/unrelated-tool" ] || die "bare no-system purge deleted foreign tool"
@@ -362,7 +370,7 @@ log "install.sh --keep direct call keeps config without prompts"
 ok "direct --keep works"
 
 log "automatic mode fails fast without timestamp (rc=1, nothing touched)"
-env -u SUDO_ELEVATION_PREFIX PATH="$SB/fakebin:$PATH" HOME="$FAKEHOME" "$REPO/install.sh" --user "$ME" --no-system --skill-dir "$SB/ffskill" >/dev/null
+se_user PATH="$SB/fakebin:$PATH" HOME="$FAKEHOME" "$REPO/install.sh" --user "$ME" --no-system --skill-dir "$SB/ffskill" >/dev/null
 # Needs passworded sudo: with NOPASSWD (e.g. CI runners) sudo -n always
 # succeeds and there is nothing to fail fast on; docker 18 covers the real
 # fail-fast path with a passworded user.
@@ -370,7 +378,10 @@ if sudo -n true 2>/dev/null; then
 	ok "fail-fast skipped (passwordless sudo here; covered by docker 18)"
 else
 	rc=0
-	HOME="$FAKEHOME" PATH="/usr/bin:/bin" "$FAKEHOME/.local/bin/sudo-elevation" uninstall --keep >"$SB/se-ff.log" 2>&1 || rc=$?
+	# PATH without fakebin on purpose: the REAL sudo must refuse (-n) so the
+	# fail-fast gate triggers. se_user still strips XDG so the CLI finds the
+	# receipt we just wrote under $FAKEHOME.
+	se_user PATH="/usr/bin:/bin" HOME="$FAKEHOME" "$FAKEHOME/.local/bin/sudo-elevation" uninstall --keep >"$SB/se-ff.log" 2>&1 || rc=$?
 	[ "$rc" -eq 1 ] || die "fail-fast should exit 1, got $rc"
 	grep -q "no valid sudo timestamp" "$SB/se-ff.log" || die "fail-fast message missing"
 	[ -f "$FAKEHOME/.local/bin/sudo-elevation" ] || die "fail-fast removed payload"
@@ -378,14 +389,39 @@ else
 fi
 
 log "leaked PREFIX does not hijack user trees"
-SUDO_ELEVATION_PREFIX="$SB/root" PATH="$SB/fakebin:$PATH" HOME="$FAKEHOME" "$FAKEHOME/.local/bin/sudo-elevation" uninstall --keep >"$SB/se-leak.log" 2>&1 \
+se_user SUDO_ELEVATION_PREFIX="$SB/root" PATH="$SB/fakebin:$PATH" HOME="$FAKEHOME" \
+	"$FAKEHOME/.local/bin/sudo-elevation" uninstall --keep >"$SB/se-leak.log" 2>&1 \
 	|| die "leaked-PREFIX uninstall failed"
 [ ! -e "$FAKEHOME/.local/bin/sudo-elevation" ] || die "leaked PREFIX missed XDG tree"
 [ -f "$SB/ilist/usr/local/share/sudo-elevation/manifest" ] || die "leaked PREFIX touched sandbox tree"
 ok "user layout wins over leaked PREFIX"
-env -u SUDO_ELEVATION_PREFIX PATH="$SB/fakebin:$PATH" HOME="$FAKEHOME" "$REPO/install.sh" --user-install --user "$ME" --no-system --uninstall --purge >/dev/null
+se_user PATH="$SB/fakebin:$PATH" HOME="$FAKEHOME" "$REPO/install.sh" --user-install --user "$ME" --no-system --uninstall --purge >/dev/null
 [ ! -e "$FAKEHOME/.local/bin/sudo-elevation" ] || die "fakehome cleanup left payload"
 [ ! -e "$FAKEHOME/.local/share/sudo-elevation/manifest" ] || die "fakehome cleanup left manifest"
 [ ! -e "$FAKEHOME/.config/sudo-elevation/config" ] || die "fakehome cleanup left config"
+
+log "XDG_* wins for the calling user (config+receipt follow XDG_CONFIG_HOME)"
+# Guards install.sh:167-169: when the target user is the caller, their XDG
+# dirs take precedence over $HOME defaults. This is the semantic that made the
+# CI host test fail (actions/checkout exports XDG_CONFIG_HOME).
+XDG=$SB/xdg
+se_user PATH="$SB/fakebin:$PATH" HOME="$FAKEHOME" XDG_CONFIG_HOME="$XDG" XDG_DATA_HOME="$XDG/data" \
+	"$REPO/install.sh" --user-install --user "$ME" --no-system --skill-dir "$FAKEHOME/skill3" >/dev/null
+[ -f "$XDG/sudo-elevation/config" ] || die "config not under XDG_CONFIG_HOME"
+[ -f "$XDG/sudo-elevation/env" ] || die "receipt not under XDG_CONFIG_HOME"
+grep -qF "SUDO_ELEVATION_CONFIG=$XDG/sudo-elevation/config" "$XDG/sudo-elevation/env" \
+	|| die "receipt does not point at the XDG config"
+[ -f "$XDG/data/sudo-elevation/manifest" ] || die "manifest not under XDG_DATA_HOME"
+[ ! -e "$FAKEHOME/.config/sudo-elevation/config" ] || die "config also written to HOME"
+# CLI must resolve the XDG tree without exports (receipt follows XDG too).
+se_user PATH="$SB/fakebin:$PATH" HOME="$FAKEHOME" XDG_CONFIG_HOME="$XDG" XDG_DATA_HOME="$XDG/data" \
+	"$FAKEHOME/.local/bin/sudo-elevation" status --porcelain >"$SB/se-xdg.log" 2>&1 \
+	|| die "CLI failed to resolve the XDG tree: $(cat "$SB/se-xdg.log")"
+grep -qF 'base_minutes=15' "$SB/se-xdg.log" || die "XDG CLI status wrong: $(cat "$SB/se-xdg.log")"
+se_user PATH="$SB/fakebin:$PATH" HOME="$FAKEHOME" XDG_CONFIG_HOME="$XDG" XDG_DATA_HOME="$XDG/data" \
+	"$REPO/install.sh" --user-install --user "$ME" --no-system --uninstall --purge >/dev/null
+[ ! -e "$XDG/sudo-elevation" ] || die "XDG purge left config"
+[ ! -e "$XDG/data/sudo-elevation" ] || die "XDG purge left manifest"
+ok "XDG precedence honored"
 
 printf '\nHOST TESTS PASSED\n'

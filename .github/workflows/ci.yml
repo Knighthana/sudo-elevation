@@ -31,8 +31,30 @@ jobs:
             tests/docker/scenarios/*.sh \
             tests/manual/lock-tty.sh
 
+      # Runner env notes (hosted ubuntu-latest): passwordless sudo, no tty for
+      # the step, and actions/checkout exports XDG_CONFIG_HOME/HOME overrides
+      # for global git config. run-host.sh neutralizes XDG_* itself; keep
+      # `pipefail` here so a failing test aborts the step instead of being
+      # masked by a later command, and echo the log tail on failure so the
+      # cause is visible on the run page without downloading job logs.
       - name: Host sandbox tests
-        run: ./tests/run-host.sh
+        run: |
+          set -o pipefail
+          ./tests/run-host.sh 2>&1 | tee host-tests.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::host tests failed (rc=$rc) - last 40 lines:"
+            tail -n 40 host-tests.log
+          fi
+          exit "$rc"
 
       - name: Docker matrix (Ubuntu 24.04 + Debian 12)
-        run: tests/docker/run.sh
+        run: |
+          set -o pipefail
+          tests/docker/run.sh 2>&1 | tee docker-tests.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::docker matrix failed (rc=$rc) - last 40 lines:"
+            tail -n 40 docker-tests.log
+          fi
+          exit "$rc"

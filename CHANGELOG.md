@@ -18,6 +18,12 @@
   skill `sudo-elevation request` 标记、异形 `CONFIG/LOG` 与未闭合 marker 块保留并告警）。
 - fix: 裸 `--no-system` 安装时自动采用目标用户 XDG 布局（root 进 root 家），卸载按 manifest
   清理；CLI 用户布局优先于残留 `SUDO_ELEVATION_PREFIX`。
+- fix(tests): host 沙箱统一经 `se`/`se_user` 包装器剥离 `XDG_CONFIG_HOME/XDG_DATA_HOME/XDG_STATE_HOME`
+  ——CI 上 `actions/checkout` 会导出 XDG 覆盖，导致 config/receipt 写到沙箱外
+  （`FAIL: no-system config missing`）；新增 XDG 优先级真实覆盖（config/receipt/manifest 跟随
+  `XDG_*`，CLI 免 export 自定位）。
+- ci: Host/Docker 步骤失败时输出 `::error::` 注解 + 日志尾部 40 行，并在 run 页直接可见，
+  无需下载 job logs（此前排查需拉 zip）。
 - fix: 交互发现每棵树透传 `--user/--skill-dir`，回放命令可粘贴；`--keep/--purge` 互斥报错；
   缺值 flags 友好报错；`manifest`/`receipt` 补记 `SUDO_CONF/SUDOERS_DIR/RUNTIME_DIR/LOG`（漂移仅告警）；
   家目录属主链安装即修正（root 代建不再毒化后续 user 安装）；`run.sh` 超时后要求 `SCENARIO-DONE rc=0`。
