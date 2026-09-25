@@ -363,12 +363,19 @@ ok "direct --keep works"
 
 log "automatic mode fails fast without timestamp (rc=1, nothing touched)"
 env -u SUDO_ELEVATION_PREFIX PATH="$SB/fakebin:$PATH" HOME="$FAKEHOME" "$REPO/install.sh" --user "$ME" --no-system --skill-dir "$SB/ffskill" >/dev/null
-rc=0
-HOME="$FAKEHOME" PATH="/usr/bin:/bin" "$FAKEHOME/.local/bin/sudo-elevation" uninstall --keep >"$SB/se-ff.log" 2>&1 || rc=$?
-[ "$rc" -eq 1 ] || die "fail-fast should exit 1, got $rc"
-grep -q "no valid sudo timestamp" "$SB/se-ff.log" || die "fail-fast message missing"
-[ -f "$FAKEHOME/.local/bin/sudo-elevation" ] || die "fail-fast removed payload"
-ok "fail-fast safe"
+# Needs passworded sudo: with NOPASSWD (e.g. CI runners) sudo -n always
+# succeeds and there is nothing to fail fast on; docker 18 covers the real
+# fail-fast path with a passworded user.
+if sudo -n true 2>/dev/null; then
+	ok "fail-fast skipped (passwordless sudo here; covered by docker 18)"
+else
+	rc=0
+	HOME="$FAKEHOME" PATH="/usr/bin:/bin" "$FAKEHOME/.local/bin/sudo-elevation" uninstall --keep >"$SB/se-ff.log" 2>&1 || rc=$?
+	[ "$rc" -eq 1 ] || die "fail-fast should exit 1, got $rc"
+	grep -q "no valid sudo timestamp" "$SB/se-ff.log" || die "fail-fast message missing"
+	[ -f "$FAKEHOME/.local/bin/sudo-elevation" ] || die "fail-fast removed payload"
+	ok "fail-fast safe"
+fi
 
 log "leaked PREFIX does not hijack user trees"
 SUDO_ELEVATION_PREFIX="$SB/root" PATH="$SB/fakebin:$PATH" HOME="$FAKEHOME" "$FAKEHOME/.local/bin/sudo-elevation" uninstall --keep >"$SB/se-leak.log" 2>&1 \
