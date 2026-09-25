@@ -149,10 +149,13 @@ if [ "$NO_SYSTEM" = 0 ] && [ "$(id -u)" != 0 ] && [ -z "$PREFIX" ]; then
 fi
 
 strip_block() {
+	# Remove our marker block(s). Fail closed on an unclosed opening marker
+	# instead of silently dropping the file tail.
 	awk '
 		/^# >>> sudo-elevation >>>[[:space:]]*$/ { skip = 1; next }
 		/^# <<< sudo-elevation <<<[[:space:]]*$/ { skip = 0; next }
 		skip != 1 { print }
+		END { if (skip == 1) exit 1 }
 	'
 }
 
@@ -170,7 +173,8 @@ check_foreign_askpass() {
 	[ -f "$SE_SUDO_CONF" ] || return 0
 	[ "$FORCE" = 1 ] && return 0
 	tmp=$(mktemp)
-	strip_block < "$SE_SUDO_CONF" > "$tmp"
+	strip_block < "$SE_SUDO_CONF" > "$tmp" \
+		|| { rm -f "$tmp"; die "$SE_SUDO_CONF has an unclosed sudo-elevation block (refusing to guess)" ; }
 	if grep -qE '^[[:space:]]*Path[[:space:]]+askpass([[:space:]]|$)' "$tmp"; then
 		rm -f "$tmp"
 		die "$SE_SUDO_CONF already configures a different askpass helper (use --force to take over)"
@@ -198,7 +202,8 @@ write_sudo_conf() {
 	local tmp
 	tmp=$(mktemp)
 	if [ -f "$SE_SUDO_CONF" ]; then
-		strip_block < "$SE_SUDO_CONF" > "$tmp"
+		strip_block < "$SE_SUDO_CONF" > "$tmp" \
+			|| { rm -f "$tmp"; die "$SE_SUDO_CONF has an unclosed sudo-elevation block (refusing to rewrite)" ; }
 	else
 		: > "$tmp"
 	fi
@@ -223,19 +228,23 @@ write_sudo_conf() {
 	fi
 	if [ -f "$SE_SUDO_CONF" ]; then
 		# Backup names carry PID so two installs within the same second
-		# never collide; prune still keeps only the newest one. The surviving
-		# name is recorded in the manifest so uninstall deletes exactly it
-		# (never an admin's own bak.* file).
+		# never collide; prune keeps only the newest OWN backup. Admin files
+		# matching bak.* but not our strict shape are never touched.
 		SE_NEW_BAK="$SE_SUDO_CONF.bak.$(date +%Y%m%d%H%M%S).$$"
 		cp -a "$SE_SUDO_CONF" "$SE_NEW_BAK"
-		# Keep only the newest backup; repeated installs must not pile up.
-		# Loop instead of xargs so unusual filenames stay safe (names are
-		# controlled timestamps, but stay defensive here as root).
-		{ ls -1t "$SE_SUDO_CONF".bak.* 2>/dev/null || true; } | tail -n +2 | while IFS= read -r old; do
-			[ -n "$old" ] || continue
+		# cp -a preserves the source mtime; bump to now so the just-created
+		# backup is unambiguously newest among our own (no ls -t lottery).
+		touch "$SE_NEW_BAK"
+		# Keep only this backup; repeated installs must not pile up.
+		# Loop instead of xargs so unusual filenames stay safe; skip self
+		# and anything that is not our own strict backup shape.
+		for old in "$SE_SUDO_CONF".bak.*; do
+			[ -e "$old" ] || continue
+			[ "$old" = "$SE_NEW_BAK" ] && continue
+			se_own_backup "$old" || continue
 			rm -f -- "$old" || true
 		done
-		SE_NEW_BAK=$(basename "$(ls -1t "$SE_SUDO_CONF".bak.* 2>/dev/null | head -n 1 || true)")
+		SE_NEW_BAK=$(basename "$SE_NEW_BAK")
 	else
 		SE_NEW_BAK=""
 	fi
@@ -462,6 +471,87 @@ chown_user_payload() {
 	chown "$TARGET_USER" "$SE_CONFIG" 2>/dev/null || true
 }
 
+# Our own sudoers drop-ins carry this header (see se_render_sudoers).
+# Ghost sweep must not delete an admin's hand-made file that merely shares
+# the 90-sudo-elevation-* prefix: require the marker, fail closed otherwise.
+se_is_own_sudoers() {
+	local f=${1-}
+	[ -f "$f" ] || return 1
+	grep -q 'Managed by sudo-elevation' "$f" 2>/dev/null
+}
+
+# Our own lease files carry epoch + minutes/restore keys (see se_write_lease
+# and grant). Sweep must not delete a foreign *.lease that merely lands in a
+# redirected RUNTIME_DIR: require the keys, fail closed otherwise.
+se_is_own_lease() {
+	local f=${1-}
+	[ -f "$f" ] || return 1
+	grep -q '^epoch=' "$f" 2>/dev/null || return 1
+	grep -qE '^(minutes|restore)=' "$f" 2>/dev/null
+}
+
+# Only kill sleepers that look like our scheduled restore (setsid sh -c
+# "sleep ...; exec .../restore ..." or systemd path). Never kill an arbitrary
+# pid recorded in a hand-made lease file.
+se_safe_kill_restore_pid() {
+	local pid=${1-}
+	case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+	if [ -r "/proc/$pid/cmdline" ]; then
+		if tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -qE 'restore|sudo-elevation|(^| )sleep( |$)'; then
+			run kill "$pid" || true
+		else
+			say "warning: not killing foreign pid $pid" >&2
+		fi
+	else
+		if kill -0 "$pid" 2>/dev/null; then run kill "$pid" || true; fi
+	fi
+}
+# Config/log deletion guard: SUDO_ELEVATION_CONFIG/LOG are env-redirectable.
+# Only delete files that look like ours (name + content marker); otherwise
+# preserve with a warning so a redirected purge never eats an arbitrary file.
+se_is_own_config() {
+	local f=${1-}
+	[ -n "$f" ] || return 1
+	[ -e "$f" ] || return 0
+	case "${f##*/}" in
+		sudo-elevation.conf|config) ;;
+		*) return 1 ;;
+	esac
+	[ ! -s "$f" ] && return 0
+	grep -q 'sudo-elevation configuration' "$f" 2>/dev/null
+}
+
+se_is_own_log() {
+	local f=${1-}
+	[ -n "$f" ] || return 1
+	[ -e "$f" ] || return 0
+	case "${f##*/}" in
+		sudo-elevation.log) ;;
+		*) return 1 ;;
+	esac
+	[ ! -s "$f" ] && return 0
+	grep -q 'actor=' "$f" 2>/dev/null
+}
+# Skill deletion guard: only remove our own rendered SKILL.md (anchored
+# marker from templates/SKILL.md.in), never a third-party file that merely
+# mentions the name. Path must be absolute and not filesystem root.
+se_safe_rm_skill() {
+	local dir=${1-}
+	case "$dir" in
+		/*) ;;
+		*) say "warning: refusing non-absolute skill dir: $dir" >&2; return 0 ;;
+	esac
+	if [ "$dir" = "/" ]; then
+		say "warning: refusing skill dir /" >&2
+		return 0
+	fi
+	if [ -f "$dir/SKILL.md" ] && grep -q 'sudo-elevation request' "$dir/SKILL.md" 2>/dev/null; then
+		run rm -f -- "$dir/SKILL.md"
+	else
+		[ -f "$dir/SKILL.md" ] && say "warning: preserving non-sudo-elevation skill: $dir/SKILL.md" >&2 || true
+	fi
+	run rmdir "$dir" 2>/dev/null || true
+}
 # Our own sudo.conf backup names: bak.YYYYMMDDHHMMSS[.PID]. Used to tell
 # our backups apart from an admin's own files (never delete those).
 se_own_backup() {
@@ -505,6 +595,12 @@ do_uninstall() {
 		users=$(se_read_kv "$SE_SHARE/manifest" USERS || true)
 		skdir=$(se_read_kv "$SE_SHARE/manifest" SKILL_DIR || true)
 		bak=$(se_read_kv "$SE_SHARE/manifest" SUDO_CONF_BAK || true)
+		# Dirty manifests (pre-fix installs could record an admin file as
+		# SUDO_CONF_BAK) must never lead to deleting it: validate early.
+		if [ -n "$bak" ] && ! se_own_backup "$bak"; then
+			say "warning: odd recorded backup name, ignoring: $bak" >&2
+			bak=""
+		fi
 		check_manifest_layout
 	fi
 	[ -n "$SKILL_DIR" ] && skdir=$SKILL_DIR
@@ -533,13 +629,10 @@ do_uninstall() {
 			mech=$(se_read_kv "$lease" restore || true)
 			pid=${mech##*pid=}
 			pid=${pid%%:*}
-			case "$pid" in
-				''|*[!0-9]*) ;;
-				# NOTE: only setsid sleepers are tracked. systemd transient
-				# timers are not cancelled here; they self-exit (no lease ->
-				# restore prints nothing-to-do without touching sudoers).
-				*) if kill -0 "$pid" 2>/dev/null; then run kill "$pid" || true; fi ;;
-			esac
+			# NOTE: only setsid sleepers are tracked. systemd transient
+			# timers are not cancelled here; they self-exit (no lease ->
+			# restore prints nothing-to-do without touching sudoers).
+			se_safe_kill_restore_pid "$pid"
 		fi
 		dest="$SE_SUDOERS_DIR/90-sudo-elevation-$(se_user_slug "$u")"
 		if [ "$DRY" = 1 ]; then
@@ -600,34 +693,38 @@ do_uninstall() {
 
 		home=$(se_home_of "$u")
 		if [ -n "$skdir" ]; then
-			if [ -f "$skdir/SKILL.md" ] && grep -q 'sudo-elevation' "$skdir/SKILL.md"; then
-				run rm -f "$skdir/SKILL.md"
-			fi
-			run rmdir "$skdir" 2>/dev/null || true
+			se_safe_rm_skill "$skdir"
 		elif [ -n "$home" ]; then
 			sk="$home/.config/opencode/skill/sudo-elevation"
-			[ -f "$sk/SKILL.md" ] && grep -q 'sudo-elevation' "$sk/SKILL.md" && run rm -f "$sk/SKILL.md"
-			run rmdir "$sk" 2>/dev/null || true
+			se_safe_rm_skill "$sk"
 		fi
 	done
-	# Ghost sweep: drop-ins for users the manifest never knew.
+	# Ghost sweep: drop-ins for users the manifest never knew. Only our own
+	# rendered files (marker header) go; an admin hand-made file sharing the
+	# prefix is preserved with a warning.
 	if [ "$SYS_OK" = 1 ]; then
 		for _ghost in "$SE_SUDOERS_DIR"/90-sudo-elevation-*; do
 			[ -e "$_ghost" ] || continue
-			run rm -f "$_ghost"
+			if se_is_own_sudoers "$_ghost"; then
+				run rm -f "$_ghost"
+			else
+				say "warning: preserving non-sudo-elevation file: $_ghost" >&2
+			fi
 		done
 	fi
-	# Ghost sweep: leases (kill tracked sleepers first).
+	# Ghost sweep: leases (kill tracked sleepers first). Foreign *.lease files
+	# without our keys (e.g. in a redirected RUNTIME_DIR) are preserved.
 	if [ "$SYS_OK" = 1 ]; then
 		for _lease in "$SE_RUNTIME_DIR"/*.lease; do
 			[ -f "$_lease" ] || continue
+			if ! se_is_own_lease "$_lease"; then
+				say "warning: preserving non-sudo-elevation lease: $_lease" >&2
+				continue
+			fi
 			mech=$(se_read_kv "$_lease" restore || true)
 			pid=${mech##*pid=}
 			pid=${pid%%:*}
-			case "$pid" in
-				''|*[!0-9]*) ;;
-				*) if kill -0 "$pid" 2>/dev/null; then run kill "$pid" || true; fi ;;
-			esac
+			se_safe_kill_restore_pid "$pid"
 			run rm -f "$_lease"
 		done
 	fi
@@ -637,13 +734,18 @@ do_uninstall() {
 			say "[dry-run] remove marker block from $SE_SUDO_CONF"
 		else
 			tmp=$(mktemp)
-			strip_block < "$SE_SUDO_CONF" > "$tmp"
+			strip_block < "$SE_SUDO_CONF" > "$tmp" \
+				|| { rm -f "$tmp"; die "$SE_SUDO_CONF has an unclosed sudo-elevation block (refusing to rewrite)" ; }
 			se_install_file "$tmp" "$SE_SUDO_CONF" 0644
 			rm -f "$tmp"
 		fi
 	fi
 
-	run rm -f "$SE_CONFIG"
+	if se_is_own_config "$SE_CONFIG"; then
+		run rm -f "$SE_CONFIG"
+	else
+		say "warning: preserving non-sudo-elevation config: $SE_CONFIG" >&2
+	fi
 	# Backups live next to the system sudo.conf: purge-only and SYS_OK-only.
 	# The manifest-recorded basename always; legacy ones only when they
 	# match our own strict name shape (an admin's bak.* files are kept).
@@ -685,7 +787,11 @@ do_uninstall() {
 	fi
 	if [ "$SYS_OK" = 1 ]; then
 		run rmdir "$SE_RUNTIME_DIR" 2>/dev/null || true
-		run rm -f "$SE_LOG"
+		if se_is_own_log "$SE_LOG"; then
+			run rm -f "$SE_LOG"
+		else
+			say "warning: preserving non-sudo-elevation log: $SE_LOG" >&2
+		fi
 	fi
 
 	if [ "$DRY" != 1 ] && [ "$SYS_OK" = 1 ] && [ "$(id -u)" = 0 ] && [ -z "$SE_PREFIX" ]; then

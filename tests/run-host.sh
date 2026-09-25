@@ -100,6 +100,37 @@ log "idempotent re-install"
 [ "$(grep -c '# >>> sudo-elevation >>>' "$SB/root/etc/sudo.conf")" = 1 ] || die "duplicate block"
 ok "single marker block"
 
+log "install prune preserves admin backups, keeps single own backup"
+printf '# admin\n' > "$SB/root/etc/sudo.conf.bak.admin-keep"
+printf '# admin2\n' > "$SB/root/etc/sudo.conf.bak.custom"
+"$REPO/install.sh" --prefix "$SB/root" --user "$ME" --skill-dir "$SB/skill" >/dev/null
+[ -f "$SB/root/etc/sudo.conf.bak.admin-keep" ] || die "admin backup deleted by install prune"
+[ -f "$SB/root/etc/sudo.conf.bak.custom" ] || die "admin backup deleted by install prune"
+own_n=0
+for b in "$SB/root"/etc/sudo.conf.bak.*; do
+	[ -f "$b" ] || continue
+	rest=${b##*.bak.}
+	case "$rest" in
+		??????????????|??????????????.*) ;;
+		*) continue ;;
+	esac
+	if printf '%s' "${rest%%.*}" | grep -Eq '^[0-9]{14}$'; then own_n=$((own_n + 1)); fi
+done
+[ "$own_n" = 1 ] || die "own backup count=$own_n want 1"
+grep -q '^SUDO_CONF_BAK=sudo.conf.bak.[0-9]' "$SB/root/usr/local/share/sudo-elevation/manifest" \
+	|| die "manifest BAK not own shape"
+ok "backup prune precise"
+
+log "unclosed marker block fails closed"
+printf '# >>> sudo-elevation >>>\nPath askpass /tmp/x\n' >> "$SB/root/etc/sudo.conf"
+if "$REPO/install.sh" --prefix "$SB/root" --user "$ME" --skill-dir "$SB/skill" >/dev/null 2>&1; then
+	die "install should fail on unclosed block"
+fi
+printf '# <<< sudo-elevation <<<\n' >> "$SB/root/etc/sudo.conf"
+"$REPO/install.sh" --prefix "$SB/root" --user "$ME" --skill-dir "$SB/skill" >/dev/null
+[ "$(grep -c '# >>> sudo-elevation >>>' "$SB/root/etc/sudo.conf")" = 1 ] || die "block repair failed"
+ok "fail-closed then repair"
+
 log "foreign askpass conflict"
 mkdir -p "$SB/conflict/etc"
 printf 'Path askpass /bin/false\n' > "$SB/conflict/etc/sudo.conf"

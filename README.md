@@ -173,14 +173,18 @@ sudo ./install.sh --user-install --user alice     # payload 进 ~/.local，配�
 
 ```bash
 sudo-elevation uninstall              # 卸软件留配置：租约先落回基窗，sudoers 基窗/marker/配置/manifest/skill/审计保留
-sudo-elevation uninstall --purge      # 删干净：配置全删，manifest 外的 90-sudo-elevation-* 与 *.lease 一并清除
+sudo-elevation uninstall --purge      # 删干净：配置全删，自有残留按内容认定清除（见下），手建异形文件保留
 # 或在仓库目录: sudo ./install.sh --uninstall [--purge]（用户安装加 --user-install）
 ```
 
 - 默认档结束所有活动租约（sudoers 回基窗、清缓存）后再删程序；`sudo -A` 在重装前不可用
   （askpass 已删），普通 sudo 不受影响。
-- `--purge` 不保留任何旧数据（怀疑旧数据有害时用）：自建 `sudo.conf` 备份按 manifest 精确删除，
-  旧版残留备份只删严格自有格式（`bak.YYYYMMDDHHMMSS[.PID]`），管理员自有备份保留。
+- `--purge` 不保留自有旧数据（怀疑旧数据有害时用）：自建 `sudo.conf` 备份按 manifest 精确删除，
+  旧版残留备份只删严格自有格式（`bak.YYYYMMDDHHMMSS[.PID]`），管理员自有备份保留；
+  `sudoers.d/90-sudo-elevation-*` 只删含 `Managed by sudo-elevation` 的自有渲染，手建同前缀文件保留并告警；
+  `*.lease` 只删含 `epoch=` + `minutes=/restore=` 的自有租约，外来 `.lease` 保留；
+  `SKILL.md` 只删含 `sudo-elevation request` 的自有渲染；`CONFIG/LOG` 异形重定向不删。
+  安装剪枝同样只删自有严格形备份，管理员备份永留。
 - `--no-system` 装/卸只动用户文件，系统部分打印 snippet 请管理员动手。
 
 ## 故障排查

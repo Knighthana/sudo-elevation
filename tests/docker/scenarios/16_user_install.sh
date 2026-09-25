@@ -67,15 +67,24 @@ assert_contains /etc/sudo.conf "Path askpass /home/tester/.local/bin/sudo-askpas
 if runuser -u tester -- sudo -n true >/dev/null 2>&1; then die "cache survived keep"; fi
 ok "keep: payload gone, config kept, lease ended"
 
-log "purge removes everything including ghosts"
-printf 'Defaults: ghost timestamp_timeout=15\n' > /etc/sudoers.d/90-sudo-elevation-ghost
+log "purge removes everything including own ghosts, preserves handmade"
+printf '# Managed by sudo-elevation test -- do not edit.\nDefaults:ghost timestamp_timeout=15\n' > /etc/sudoers.d/90-sudo-elevation-ghost
+chmod 0440 /etc/sudoers.d/90-sudo-elevation-ghost
+printf 'Defaults:handmade timestamp_timeout=10\n' > /etc/sudoers.d/90-sudo-elevation-handmade
+chmod 0440 /etc/sudoers.d/90-sudo-elevation-handmade
 printf 'epoch=1-1-1\nminutes=5\nrestore=none\n' > /run/sudo-elevation/ghost.lease
+printf 'foreign\n' > /run/sudo-elevation/notes.txt
 touch /etc/sudo.conf.bak.20000101000000
 printf '# admin backup\n' > /etc/sudo.conf.bak.admin-keep
 "$REPO/install.sh" --user-install --user tester --uninstall --purge >/dev/null
 assert_no_file /etc/sudoers.d/90-sudo-elevation-tester
 assert_no_file /etc/sudoers.d/90-sudo-elevation-ghost
+assert_file /etc/sudoers.d/90-sudo-elevation-handmade
+rm -f /etc/sudoers.d/90-sudo-elevation-handmade
 assert_no_file /run/sudo-elevation/ghost.lease
+assert_file /run/sudo-elevation/notes.txt
+rm -f /run/sudo-elevation/notes.txt
+rmdir /run/sudo-elevation 2>/dev/null || true
 assert_no_file /home/tester/.config/sudo-elevation/config
 assert_no_file /home/tester/.config/sudo-elevation/env
 assert_no_file /home/tester/.local/share/sudo-elevation/manifest
