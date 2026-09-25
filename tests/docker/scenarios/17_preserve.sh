@@ -63,6 +63,28 @@ assert_contains /tmp/foreign.conf "FOREIGN=1"
 rm -f /tmp/foreign.conf /tmp/foreign.log /tmp/other-skill.md
 ok "config/log guards"
 
+log "bare --no-system as root still uses target XDG homes, touches no system dir"
+# reset leftovers from the redirect test above (its purge intentionally
+# skipped the default tree to prove foreign preservation)
+"$REPO/install.sh" --user tester --uninstall --purge >/dev/null
+"$REPO/install.sh" --user tester --no-system --skill-dir /tmp/se-nsskill >/dev/null
+grep -q '^INSTALL_MODE=user$' /home/tester/.local/share/sudo-elevation/manifest \
+	|| die "bare no-system not user mode"
+grep -q '^SYSTEM=0$' /home/tester/.local/share/sudo-elevation/manifest || die "bare no-system SYSTEM!=0"
+assert_file /home/tester/.local/bin/sudo-elevation
+assert_file /home/tester/.config/sudo-elevation/config
+assert_no_file /usr/local/bin/sudo-elevation
+assert_no_file /etc/sudo-elevation.conf
+assert_no_file /etc/sudoers.d/90-sudo-elevation-tester
+assert_not_contains /etc/sudo.conf "# >>> sudo-elevation >>>"
+# same flags the CLI forwards from the manifest (INSTALL_MODE=user, SYSTEM=0)
+"$REPO/install.sh" --user-install --user tester --no-system --uninstall --purge >/dev/null
+assert_no_file /home/tester/.local/bin/sudo-elevation
+assert_no_file /home/tester/.local/share/sudo-elevation/manifest
+assert_no_file /usr/local/bin/sudo-elevation
+assert_no_file /etc/sudo-elevation.conf
+ok "bare no-system stays in user dirs"
+
 assert_ok visudo -c
 assert_ok sudo -V
 ok "preserve all"

@@ -167,6 +167,9 @@ sudo ./install.sh --user-install --user alice     # payload 进 ~/.local，配�
 - CLI 靠该 receipt 自动定位，无需 export；root 侧 helper 由 CLI 显式传递 `--config-file`。
 - sudoers drop-in 与 `sudo.conf` marker 仍是系统文件：要么 root 装，要么 `--no-system`
   跳过并打印管理员 snippet（未应用前工具 inert）。root 代装时 payload 属主归目标用户。
+- `--no-system` 的含义就是不动任何系统目录（`/usr/local`、`/etc`、`/run`、
+  `/var/log` 都不碰）：不带 `--prefix` 时自动采用目标用户的 XDG 布局，
+  root 执行则装进 root 自己的家目录；卸载时按 manifest 记录的布局清理。
 - 卸载同样加 `--user-install`（CLI `uninstall` 按 manifest 自动转发）。
 
 ## 卸载（包管理器式两档）

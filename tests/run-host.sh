@@ -237,6 +237,19 @@ env -u SUDO_ELEVATION_PREFIX PATH="$SB/fakebin:$PATH" HOME="$FAKEHOME" "$FAKEHOM
 [ ! -e "$UH/.config/sudo-elevation/env" ] || die "no-system leaked receipt into real HOME"
 ok "no-system install/uninstall precise"
 
+log "bare --no-system implies user layout (never system dirs)"
+env -u SUDO_ELEVATION_PREFIX PATH="$SB/fakebin:$PATH" HOME="$FAKEHOME" "$REPO/install.sh" --user "$ME" --no-system --skill-dir "$FAKEHOME/skill2" >/dev/null
+grep -q '^INSTALL_MODE=user$' "$FAKEHOME/.local/share/sudo-elevation/manifest" || die "bare no-system not user mode"
+grep -q '^SYSTEM=0$' "$FAKEHOME/.local/share/sudo-elevation/manifest" || die "bare no-system SYSTEM!=0"
+[ -f "$FAKEHOME/.local/bin/sudo-elevation" ] || die "bare no-system payload missing"
+[ -f "$FAKEHOME/.config/sudo-elevation/config" ] || die "bare no-system config missing"
+env -u SUDO_ELEVATION_PREFIX PATH="$SB/fakebin:$PATH" HOME="$FAKEHOME" "$FAKEHOME/.local/bin/sudo-elevation" uninstall --purge >/dev/null
+[ ! -e "$FAKEHOME/.local/bin/sudo-elevation" ] || die "bare no-system purge left payload"
+[ ! -e "$FAKEHOME/.local/share/sudo-elevation/manifest" ] || die "bare no-system purge left manifest"
+[ -f "$FAKEHOME/unrelated-tool" ] || die "bare no-system purge deleted foreign tool"
+[ ! -e "$UH/.local/bin/sudo-elevation" ] || die "bare no-system leaked into real HOME"
+ok "bare no-system stays in user dirs"
+
 log "prefix + no-system: sandbox system files skipped on uninstall"
 NSR=$SB/nsroot
 mkdir -p "$NSR/etc/sudoers.d"

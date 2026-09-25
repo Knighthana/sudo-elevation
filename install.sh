@@ -64,8 +64,11 @@ options:
                         ~/.config (no /usr/local pollution). System files
                         (sudoers drop-in, sudo.conf marker) still need root
                         unless --no-system is given.
-  --no-system           skip system files (sudoers drop-in, sudo.conf marker);
-                        prints the exact root snippet for an admin instead.
+  --no-system           never touch system directories (sudoers drop-in,
+                        sudo.conf marker, /usr/local, /etc, /run, /var/log);
+                        without --prefix this implies the --user-install
+                        layout for the target user (root included), printing
+                        the exact root snippet for an admin instead.
                         Without the snippet applied the tool stays inert.
   --skill-dir DIR       override opencode skill directory
   --no-skill            do not install the opencode skill
@@ -108,6 +111,17 @@ done
 id "$TARGET_USER" >/dev/null 2>&1 || die "no such user: $TARGET_USER"
 
 [ "$USER_INSTALL" = 1 ] && [ -n "$PREFIX" ] && die "--user-install cannot be combined with --prefix"
+
+# --no-system means "touch no system directory", no matter who runs (root
+# included: root gets root's own XDG homes). Without --prefix there is no
+# other non-system layout, so it implies --user-install for TARGET_USER.
+# Install-time only: uninstall honors the recorded manifest layout, so
+# pre-fix installs (payload under /usr/local) still clean up where they
+# actually wrote.
+if [ "$ACTION" = install ] && [ "$NO_SYSTEM" = 1 ] && [ "$USER_INSTALL" = 0 ] && [ -z "$PREFIX" ]; then
+	say "--no-system: using user layout for $TARGET_USER (no system directories touched)"
+	USER_INSTALL=1
+fi
 
 # XDG user layout must be resolved BEFORE common.sh is sourced: it computes
 # every SE_* path at source time. getent is used directly (se_home_of lives
