@@ -259,13 +259,21 @@ EOF
 			exit 1
 		fi
 		# Re-apply the recorded install layout (user-install without exports).
+		# A user install is receipt-located and never needs --prefix, even
+		# when SUDO_ELEVATION_PREFIX leaks in from a test shell: prefer the
+		# manifest layout over the env prefix so we never uninstall the
+		# wrong tree (or die on --prefix + --user-install).
 		mode=()
+		user_mode=0
 		if [ -f "$SE_SHARE/manifest" ]; then
-			[ "$(se_read_kv "$SE_SHARE/manifest" INSTALL_MODE || true)" = user ] && mode+=(--user-install)
+			if [ "$(se_read_kv "$SE_SHARE/manifest" INSTALL_MODE || true)" = user ]; then
+				mode+=(--user-install)
+				user_mode=1
+			fi
 			[ "$(se_read_kv "$SE_SHARE/manifest" SYSTEM || true)" = 0 ] && mode+=(--no-system)
 		fi
-		if [ -n "${SUDO_ELEVATION_PREFIX:-}" ]; then
-			exec "$installer" --prefix "$SUDO_ELEVATION_PREFIX" --uninstall ${purge[@]+"${purge[@]}"}
+		if [ -n "${SUDO_ELEVATION_PREFIX:-}" ] && [ "$user_mode" = 0 ]; then
+			exec "$installer" --prefix "$SUDO_ELEVATION_PREFIX" --uninstall ${mode[@]+"${mode[@]}"} ${purge[@]+"${purge[@]}"}
 		elif [ -t 0 ] || [ -t 1 ]; then
 			exec sudo "$installer" --uninstall ${mode[@]+"${mode[@]}"} ${purge[@]+"${purge[@]}"}
 		else

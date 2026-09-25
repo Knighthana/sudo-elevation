@@ -195,6 +195,65 @@ grep -qF -- "--no-system" <<<"$out" || die "no-system note missing: $out"
 [ ! -e "$UH/.config/sudo-elevation/env" ] || die "dry-run wrote receipt"
 ok "user dry-run clean"
 
+log "no-system user-install: real files land in HOME, system untouched, purge preserves foreign"
+FAKEHOME=$SB/fakehome
+mkdir -p "$SB/fakebin" "$FAKEHOME"
+# full sandbox: fake sudo (no privilege) + fake getent (redirect passwd home);
+# --user-install resolves all paths from getent, the CLI receipt from HOME
+printf '#!/bin/sh\nif [ "$1" = "-V" ]; then echo "Sudo version 1.9.15p5"; exit 0; fi\nif [ "$1" = "-A" ]; then shift; fi\nexec "$@"\n' > "$SB/fakebin/sudo"
+{
+	printf '#!/bin/sh\n'
+	printf 'if [ "$1" = passwd ] && [ "$2" = "%s" ]; then\n' "$ME"
+	printf '	printf "%%s:x:1000:1000::%%s:/bin/bash\\n" "%s" "%s"\n' "$ME" "$FAKEHOME"
+	printf 'else\n	exec /usr/bin/getent "$@"\nfi\n'
+} > "$SB/fakebin/getent"
+chmod 0755 "$SB/fakebin/sudo" "$SB/fakebin/getent"
+command -v getent >/dev/null || die "getent missing"
+[ -x /usr/bin/getent ] || die "expected getent at /usr/bin/getent"
+printf '#!/bin/sh\necho hi\n' > "$FAKEHOME/unrelated-tool"
+printf 'third party without marker\n' > "$FAKEHOME/foreign-skill.md"
+# NOTE: SUDO_ELEVATION_PREFIX must be empty here (it is exported globally for
+# the prefix-sandbox tests); user installs are receipt-located, not prefixed.
+env -u SUDO_ELEVATION_PREFIX PATH="$SB/fakebin:$PATH" HOME="$FAKEHOME" "$REPO/install.sh" --user-install --user "$ME" --no-system --skill-dir "$FAKEHOME/skill" >/dev/null
+[ -f "$FAKEHOME/.local/bin/sudo-elevation" ] || die "no-system payload missing"
+[ -f "$FAKEHOME/.config/sudo-elevation/config" ] || die "no-system config missing"
+[ -f "$FAKEHOME/.config/sudo-elevation/env" ] || die "no-system receipt missing"
+grep -q '^SYSTEM=0$' "$FAKEHOME/.local/share/sudo-elevation/manifest" || die "manifest SYSTEM!=0"
+grep -q 'sudo-elevation request' "$FAKEHOME/skill/SKILL.md" || die "no-system skill missing"
+[ -f "$FAKEHOME/unrelated-tool" ] || die "foreign tool lost on install"
+mkdir -p "$FAKEHOME/skill-other"
+cp "$FAKEHOME/foreign-skill.md" "$FAKEHOME/skill-other/SKILL.md"
+# full CLI path (fake sudo stands in for privilege): manifest SYSTEM=0 must
+# forward --no-system so no root-owned system path is touched
+env -u SUDO_ELEVATION_PREFIX PATH="$SB/fakebin:$PATH" HOME="$FAKEHOME" "$FAKEHOME/.local/bin/sudo-elevation" uninstall --purge >/dev/null
+[ ! -e "$FAKEHOME/.local/bin/sudo-elevation" ] || die "no-system purge left payload"
+[ ! -e "$FAKEHOME/.config/sudo-elevation/config" ] || die "no-system purge left config"
+[ ! -e "$FAKEHOME/.config/sudo-elevation/env" ] || die "no-system purge left receipt"
+[ ! -e "$FAKEHOME/.local/share/sudo-elevation/manifest" ] || die "no-system purge left manifest"
+[ ! -e "$FAKEHOME/skill/SKILL.md" ] || die "no-system purge left skill"
+[ -f "$FAKEHOME/unrelated-tool" ] || die "no-system purge deleted foreign tool"
+[ -f "$FAKEHOME/skill-other/SKILL.md" ] || die "no-system purge deleted third-party skill"
+[ ! -e "$UH/.local/bin/sudo-elevation" ] || die "no-system leaked into real HOME"
+[ ! -e "$UH/.config/sudo-elevation/env" ] || die "no-system leaked receipt into real HOME"
+ok "no-system install/uninstall precise"
+
+log "prefix + no-system: sandbox system files skipped on uninstall"
+NSR=$SB/nsroot
+mkdir -p "$NSR/etc/sudoers.d"
+printf 'Defaults lecture\n' > "$NSR/etc/sudo.conf"
+printf 'root ALL=(ALL) ALL\n' > "$NSR/etc/sudoers.d/10-admin"
+chmod 0440 "$NSR/etc/sudoers.d/10-admin"
+printf '# admin\n' > "$NSR/etc/sudo.conf.bak.admin-keep"
+"$REPO/install.sh" --prefix "$NSR" --user "$ME" --skill-dir "$SB/nsskill" --no-system >/dev/null
+grep -q '^SYSTEM=0$' "$NSR/usr/local/share/sudo-elevation/manifest" || die "prefix manifest SYSTEM!=0"
+[ ! -e "$NSR/etc/sudoers.d/90-sudo-elevation-$ME" ] || die "no-system install wrote sudoers"
+SUDO_ELEVATION_PREFIX="$NSR" PATH="$SB/fakebin:$PATH" "$NSR/usr/local/bin/sudo-elevation" uninstall --purge >/dev/null
+[ ! -e "$NSR/usr/local/bin/sudo-elevation" ] || die "prefix no-system purge left payload"
+[ -f "$NSR/etc/sudoers.d/10-admin" ] || die "prefix no-system purge deleted foreign sudoers"
+grep -q 'Defaults lecture' "$NSR/etc/sudo.conf" || die "prefix sudo.conf foreign lost"
+[ -f "$NSR/etc/sudo.conf.bak.admin-keep" ] || die "prefix no-system purge deleted admin backup"
+ok "prefix no-system skips system files"
+
 log "keep uninstall via CLI (prefix sandbox, no sudo needed)"
 "$SE" uninstall >/dev/null
 for f in usr/local/bin/sudo-askpass usr/local/bin/sudo-elevation \
