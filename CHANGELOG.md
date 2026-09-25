@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased (breaking: bare uninstall is now interactive)
+
+- change: 不带参数的 `uninstall`（CLI 与 `install.sh`）改为互动模式——列出 receipt/manifest/
+  系统痕迹三层发现的每一棵安装，逐棵确认 keep/purge/skip（5 分钟无应答按跳过）；
+  无 tty 时只列出精确命令并以非零退出，不删任何东西。脚本请改用显式参数。
+- feat: 带参 `uninstall` 即自动模式（无人值守）：零提示、fail-fast（`sudo -n`，无有效
+  时间戳直接报错，不挂起）；CLI 放开 `--keep/--user-install/--no-system/--prefix/--user/--skill-dir/--dry-run`，
+  显式优先、manifest 补齐；新增 `--keep` 显式档。
+- fix: `manifest` 记录 `PREFIX`（卸载请求不符告警）；用户安装优先 receipt 布局，
+  不再被残留 `SUDO_ELEVATION_PREFIX` 带偏卸错树；`keep` 后打印按 manifest 配好的二次
+  purge 仓库命令（CLI 自删后仍可继续）；交互子调用带显式 flag，不会二次弹提示。
+- tests: 新增 `18_autouninstall`（list-only/fail-fast/自动 keep/pty 交互/回放 purge）；
+  `06/16` 改用 `--keep`；host 增 list-only 与 pty 交互用例。
+
 ## 0.1.6 - 2026-09-24
 
 - feat: XDG 用户目录安装（`--user-install`）：payload 进 `~/.local`、配置进 `~/.config`，

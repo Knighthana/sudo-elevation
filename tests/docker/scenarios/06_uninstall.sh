@@ -44,7 +44,7 @@ set_ui 15 testpass
 as_tester /usr/local/bin/sudo-elevation request --for 15m --reason "keep test" >/dev/null
 
 log "keep uninstall via CLI: payload gone, config kept, lease ended"
-if ! as_tester /usr/local/bin/sudo-elevation uninstall >/tmp/se-uninstall.log 2>&1; then
+if ! as_tester /usr/local/bin/sudo-elevation uninstall --keep >/tmp/se-uninstall.log 2>&1; then
 	cat /tmp/se-uninstall.log
 	die "CLI keep uninstall failed"
 fi

@@ -54,7 +54,7 @@ ok "lease works"
 
 log "keep uninstall via CLI (manifest forwards --user-install)"
 if ! runuser -u tester -- env SUDO_ASKPASS=/tmp/se-ui-fake \
-	/home/tester/.local/bin/sudo-elevation uninstall >/tmp/se-ui-keep.log 2>&1; then
+	/home/tester/.local/bin/sudo-elevation uninstall --keep >/tmp/se-ui-keep.log 2>&1; then
 	cat /tmp/se-ui-keep.log
 	die "CLI keep uninstall failed"
 fi

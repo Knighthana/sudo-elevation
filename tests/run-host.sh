@@ -200,7 +200,8 @@ FAKEHOME=$SB/fakehome
 mkdir -p "$SB/fakebin" "$FAKEHOME"
 # full sandbox: fake sudo (no privilege) + fake getent (redirect passwd home);
 # --user-install resolves all paths from getent, the CLI receipt from HOME
-printf '#!/bin/sh\nif [ "$1" = "-V" ]; then echo "Sudo version 1.9.15p5"; exit 0; fi\nif [ "$1" = "-A" ]; then shift; fi\nexec "$@"\n' > "$SB/fakebin/sudo"
+# fake sudo: answers -V, strips -n/-A (emulates a valid timestamp), else execs
+printf '#!/bin/sh\nif [ "$1" = "-V" ]; then echo "Sudo version 1.9.15p5"; exit 0; fi\nwhile :; do case "$1" in -n|-A) shift;; *) break;; esac; done\nexec "$@"\n' > "$SB/fakebin/sudo"
 {
 	printf '#!/bin/sh\n'
 	printf 'if [ "$1" = passwd ] && [ "$2" = "%s" ]; then\n' "$ME"
@@ -268,7 +269,7 @@ grep -q 'Defaults lecture' "$NSR/etc/sudo.conf" || die "prefix sudo.conf foreign
 ok "prefix no-system skips system files"
 
 log "keep uninstall via CLI (prefix sandbox, no sudo needed)"
-"$SE" uninstall >/dev/null
+"$SE" uninstall --keep >/dev/null
 for f in usr/local/bin/sudo-askpass usr/local/bin/sudo-elevation \
 	usr/local/libexec/sudo-elevation/grant usr/local/libexec/sudo-elevation/install.sh \
 	usr/local/libexec/sudo-elevation/restore; do
@@ -295,5 +296,33 @@ if [ -f "$SB/root/etc/sudo.conf" ]; then
 	! grep -q 'sudo-elevation' "$SB/root/etc/sudo.conf" || die "leftover sudo.conf block"
 fi
 ok "purge clean"
+
+log "bare uninstall without tty only lists (exit 2, nothing removed)"
+"$REPO/install.sh" --prefix "$SB/ilist" --user "$ME" --skill-dir "$SB/iskill" >/dev/null
+if SUDO_ELEVATION_PREFIX="$SB/ilist" "$REPO/install.sh" --uninstall </dev/null >/tmp/se-list.log 2>&1; then
+	die "list-only should exit nonzero when action is needed"
+fi
+grep -qF "$SB/ilist/usr/local/share/sudo-elevation/manifest" /tmp/se-list.log \
+	|| die "list missed sandbox tree: $(cat /tmp/se-list.log)"
+grep -q "nothing was removed" /tmp/se-list.log || die "list must state nothing removed"
+[ -f "$SB/ilist/usr/local/bin/sudo-elevation" ] || die "list-only removed payload"
+ok "list-only safe"
+
+log "bare uninstall on a pty asks per tree (skip keeps everything)"
+if ! command -v script >/dev/null 2>&1; then
+	die "script(1) missing for pty test"
+fi
+printf 's\n' | script -qec "env SUDO_ELEVATION_PREFIX='$SB/ilist' '$REPO/install.sh' --uninstall" /dev/null >/tmp/se-pty.log 2>&1 || true
+grep -q "skipped=1" /tmp/se-pty.log || die "pty skip summary missing: $(cat /tmp/se-pty.log)"
+[ -f "$SB/ilist/usr/local/bin/sudo-elevation" ] || die "pty skip removed payload"
+ok "interactive skip safe"
+
+log "bare uninstall on a pty answers keep (payload gone, config kept)"
+printf 'k\n' | script -qec "env SUDO_ELEVATION_PREFIX='$SB/ilist' '$REPO/install.sh' --uninstall" /dev/null >/tmp/se-pty2.log 2>&1 || true
+grep -q "kept=1" /tmp/se-pty2.log || die "pty keep summary missing: $(cat /tmp/se-pty2.log)"
+[ ! -e "$SB/ilist/usr/local/bin/sudo-elevation" ] || die "pty keep left payload"
+[ -f "$SB/ilist/usr/local/share/sudo-elevation/manifest" ] || die "pty keep removed manifest"
+grep -q "install.sh.*--uninstall --purge" /tmp/se-pty2.log || die "keep must print purge replay"
+ok "interactive keep works"
 
 printf '\nHOST TESTS PASSED\n'

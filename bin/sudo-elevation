@@ -25,7 +25,12 @@ commands:
   grant   --for <duration> [--reason TEXT]   approve a lease from a terminal (headless)
   status [--porcelain]                       show active lease and base window
   lock                                       revoke sudo cache and restore base window
-  uninstall [--purge]                        remove software but keep config (--purge deletes everything)
+  uninstall [--purge]                      remove software but keep config (--purge deletes everything)
+                                             bare uninstall is interactive (lists every install, asks per tree);
+                                             any flag means automatic mode (fail-fast, never prompts)
+  uninstall --keep ...                       explicit keep, automatic mode (for scripts)
+  uninstall --purge [--user-install] [--no-system] [--prefix DIR] [--user U] [--skill-dir D] [--dry-run]
+                                             automatic removal of one tree (manifest fills in the rest)
   parse <duration>                           print minutes for a duration spec
   version                                    print version
 
@@ -244,11 +249,21 @@ EOF
 		fi
 		printf 'sudo-elevation: 已撤销当前 sudo 缓存；配置将在定时恢复/下次授权时回到基础窗口（sudo 超时仍会保护）\n'
 		;;
-	uninstall)
+  uninstall)
 		purge=()
+		fwd=()
+		explicit=0
+		explicit_ui=0
 		while [ $# -gt 0 ]; do
 			case "$1" in
-				--purge) purge=(--purge); shift ;;
+				--purge) purge=(--purge); fwd+=(--purge); explicit=1; shift ;;
+				--keep) fwd+=(--keep); explicit=1; shift ;;
+				--user-install) fwd+=(--user-install); explicit=1; explicit_ui=1; shift ;;
+				--no-system) fwd+=(--no-system); explicit=1; shift ;;
+				--prefix) fwd+=(--prefix "${2-}"); explicit=1; shift 2 ;;
+				--user) fwd+=(--user "${2-}"); explicit=1; shift 2 ;;
+				--skill-dir) fwd+=(--skill-dir "${2-}"); explicit=1; shift 2 ;;
+				--dry-run|-n) fwd+=(--dry-run); explicit=1; shift ;;
 				-h|--help) usage; exit 0 ;;
 				*) echo "uninstall: unknown argument: $1" >&2; exit 2 ;;
 			esac
@@ -258,26 +273,46 @@ EOF
 			echo "uninstall: $installer not found (install first, or run ./install.sh --uninstall from the repository)" >&2
 			exit 1
 		fi
+		if [ "$explicit" = 0 ]; then
+			# Interactive: the installer owns discovery. Auth first when a
+			# terminal is present; otherwise list without touching anything.
+			if [ -t 0 ] || [ -t 1 ]; then
+				exec sudo "$installer" --uninstall
+			elif sudo -n true 2>/dev/null; then
+				exec sudo -n "$installer" --uninstall
+			else
+				exec "$installer" --uninstall
+			fi
+		fi
+		# Automatic (unattended/script): explicit flags win, the manifest
+		# fills in the rest. Fail fast: never hang on a password prompt.
 		# Re-apply the recorded install layout (user-install without exports).
 		# A user install is receipt-located and never needs --prefix, even
 		# when SUDO_ELEVATION_PREFIX leaks in from a test shell: prefer the
 		# manifest layout over the env prefix so we never uninstall the
 		# wrong tree (or die on --prefix + --user-install).
-		mode=()
-		user_mode=0
+		user_mode=$explicit_ui
 		if [ -f "$SE_SHARE/manifest" ]; then
 			if [ "$(se_read_kv "$SE_SHARE/manifest" INSTALL_MODE || true)" = user ]; then
-				mode+=(--user-install)
 				user_mode=1
+				[ "$explicit_ui" = 1 ] || fwd+=(--user-install)
 			fi
-			[ "$(se_read_kv "$SE_SHARE/manifest" SYSTEM || true)" = 0 ] && mode+=(--no-system)
+			if [ "$(se_read_kv "$SE_SHARE/manifest" SYSTEM || true)" = 0 ]; then
+				has_ns=0
+				for f in ${fwd[@]+"${fwd[@]}"}; do
+					[ "$f" = "--no-system" ] && has_ns=1
+				done
+				[ "$has_ns" = 0 ] && fwd+=(--no-system)
+			fi
 		fi
 		if [ -n "${SUDO_ELEVATION_PREFIX:-}" ] && [ "$user_mode" = 0 ]; then
-			exec "$installer" --prefix "$SUDO_ELEVATION_PREFIX" --uninstall ${mode[@]+"${mode[@]}"} ${purge[@]+"${purge[@]}"}
-		elif [ -t 0 ] || [ -t 1 ]; then
-			exec sudo "$installer" --uninstall ${mode[@]+"${mode[@]}"} ${purge[@]+"${purge[@]}"}
+			exec "$installer" --prefix "$SUDO_ELEVATION_PREFIX" --uninstall "${fwd[@]}" ${purge[@]+"${purge[@]}"}
+		elif ! sudo -n true 2>/dev/null; then
+			echo "uninstall (automatic): no valid sudo timestamp; run sudo -v first," >&2
+			echo "or run bare 'sudo-elevation uninstall' on a terminal for interactive removal." >&2
+			exit 1
 		else
-			exec sudo -A "$installer" --uninstall ${mode[@]+"${mode[@]}"} ${purge[@]+"${purge[@]}"}
+			exec sudo -n "$installer" --uninstall "${fwd[@]}" ${purge[@]+"${purge[@]}"}
 		fi
 		;;
 	parse)

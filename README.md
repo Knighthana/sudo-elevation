@@ -138,7 +138,9 @@ SE_TEST_IMAGES="debian:12" tests/docker/run.sh 03_lease_expiry.sh
 Docker 场景覆盖：安装/幂等/权限位、askpass 认证与错误密码、租约到期与自动恢复、
 仅本次、until-lock + lock、CLI 卸载（含备份/运行时目录清理）、卸载保留第三方配置、
 外来 `Path askpass` 冲突、headless grant、弹窗参数（zenity 与 kdialog）、
-epoch 守卫、无 GUI 快速失败、15_extra（非法时长/reason 截断/porcelain/fail-closed/取消保缓存/P1 回归/strict 配置）。
+epoch 守卫、无 GUI 快速失败、15_extra（非法时长/reason 截断/porcelain/fail-closed/取消保缓存/P1 回归/strict 配置）、
+16_user_install（XDG 布局/属主/receipt/keep-purge）、17_preserve（不误删：ghost 内容认定/备份精度/外来保留）、
+18_autouninstall（裸 list-only/fail-fast/自动 keep/pty 交互/回放 purge）。
 
 推送/PR 时 GitHub Actions（`.github/workflows/ci.yml`）自动执行
 shellcheck + host 沙箱 + Docker 矩阵。
@@ -175,11 +177,18 @@ sudo ./install.sh --user-install --user alice     # payload 进 ~/.local，配�
 ## 卸载（包管理器式两档）
 
 ```bash
-sudo-elevation uninstall              # 卸软件留配置：租约先落回基窗，sudoers 基窗/marker/配置/manifest/skill/审计保留
-sudo-elevation uninstall --purge      # 删干净：配置全删，自有残留按内容认定清除（见下），手建异形文件保留
+sudo-elevation uninstall              # 互动：列出所有安装并逐棵确认（keep/purge/skip），无 tty 时只列出
+sudo-elevation uninstall --purge      # 自动：无人值守，要求有效 sudo 时间戳（先 sudo -v），无提示
+sudo-elevation uninstall --keep       # 自动：显式 keep，供脚本使用（裸命令已改为互动）
 # 或在仓库目录: sudo ./install.sh --uninstall [--purge]（用户安装加 --user-install）
 ```
 
+- 带参即自动模式：零提示、失败即停（fail-fast，无密码提示挂起）；`--user-install/--no-system/--prefix/--user/--skill-dir/--dry-run`
+  可钉死单棵树，未给的按 manifest 自动补齐；`--dry-run` 即预览。
+- 不带参即互动模式：receipt + manifest + 系统痕迹三层发现，每棵展示模式/用户/租约/skill/备份与精确命令，
+  当场确认；提示 5 分钟无应答按跳过；无 tty 时只列出并退出（需处理时返回码非零）。
+- `keep` 会删掉 CLI 与自带卸载器（manifest 保留），二次 purge 用当时打印的仓库命令
+  （如 `sudo ./install.sh --user-install --uninstall --purge`，flags 已按 manifest 配好）。
 - 默认档结束所有活动租约（sudoers 回基窗、清缓存）后再删程序；`sudo -A` 在重装前不可用
   （askpass 已删），普通 sudo 不受影响。
 - `--purge` 不保留自有旧数据（怀疑旧数据有害时用）：自建 `sudo.conf` 备份按 manifest 精确删除，
