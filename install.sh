@@ -815,11 +815,21 @@ se_is_own_log() {
 	[ ! -s "$f" ] && return 0
 	grep -q 'actor=' "$f" 2>/dev/null
 }
-# Skill deletion guard: only remove our own rendered SKILL.md (anchored
-# marker from templates/SKILL.md.in), never a third-party file that merely
-# mentions the name. Path must be absolute and not filesystem root.
+# Skill deletion guard: only remove our own rendered SKILL.md, identified by
+# the 'Managed by sudo-elevation' marker that templates/SKILL.md.in emits. That
+# is the same token the sudoers backup guard (se_own_backup) looks for, so a
+# single grep lists everything of ours under /etc and /usr/local.
+#
+# It is a marker check, not a content check, and there is deliberately NO
+# fallback for skills rendered before the marker existed. The old check keyed on
+# the substring 'sudo-elevation request', which any third-party skill could
+# contain by accident -- that is the direction that eats somebody else's file.
+# A pre-marker install therefore keeps its SKILL.md through a purge (loudly
+# explained below); tools/purge-legacy-skill.sh clears those on demand.
+# Path must be absolute and not filesystem root.
 se_safe_rm_skill() {
 	local dir=${1-}
+	local f
 	case "$dir" in
 		/*) ;;
 		*) say "warning: refusing non-absolute skill dir: $dir" >&2; return 0 ;;
@@ -828,10 +838,18 @@ se_safe_rm_skill() {
 		say "warning: refusing skill dir /" >&2
 		return 0
 	fi
-	if [ -f "$dir/SKILL.md" ] && grep -q 'sudo-elevation request' "$dir/SKILL.md" 2>/dev/null; then
-		run rm -f -- "$dir/SKILL.md"
+	f=$dir/SKILL.md
+	if [ ! -f "$f" ]; then
+		:
+	elif grep -q 'Managed by sudo-elevation' "$f" 2>/dev/null; then
+		run rm -f -- "$f"
+	elif grep -q 'sudo-elevation request' "$f" 2>/dev/null; then
+		# Looks like ours but predates the marker, so the guard cannot prove it.
+		# Say exactly that, rather than blaming a third party.
+		say "warning: $f predates the ownership marker, so it is NOT ours to prove; left in place" >&2
+		say "         clear it from a repo checkout: tools/purge-legacy-skill.sh" >&2
 	else
-		[ -f "$dir/SKILL.md" ] && say "warning: preserving non-sudo-elevation skill: $dir/SKILL.md" >&2 || true
+		say "warning: preserving non-sudo-elevation skill: $f" >&2
 	fi
 	run rmdir "$dir" 2>/dev/null || true
 }

@@ -1,45 +1,20 @@
 ---
 name: sudo-elevation
-description: Use when a task needs root via sudo on this machine, when running commands as root, or when sudo reports that a password is required. Covers non-interactive `sudo -n`, time-boxed lease requests via `sudo-elevation request`, and the status/lock commands.
+description: Use when a task needs root on this machine, or when sudo reports that a password is required. Covers lease requests, status, and revocation.
 ---
+
+<!-- Managed by sudo-elevation. Do not edit; rendered from templates/SKILL.md.in. -->
 
 # sudo-elevation (v@@VERSION@@, base @@BASE_HUMAN_EN@@)
 
-Rule: always try `sudo -n <cmd>` first. Never retry bare `sudo` on a password prompt; request a lease instead.
+1. Try `sudo -n <cmd>` first. On a password prompt, never retry interactive `sudo`: run `sudo-elevation request --for <DUR> --reason "<task>"`, then retry `sudo -n`. The user can change the duration in the dialog.
+2. Request the shortest practical lease -- about `15m` when attended, `2h`-`12h` for long unattended work -- and request again if it expires. If a request fails or its dialog times out (~5min), stop and report; do not loop requests.
+3. Use `until-lock` only with the user's agreement, then run `sudo-elevation lock` and confirm `sudo-elevation status` shows no lease.
 
-## Commands
+`<DUR>`: `90s` | `45m` | `2h` | `1d` | bare minutes | `until-lock`. One value and one unit only (`90s`, not `1m30s`); invalid values fail immediately.
 
-```bash
-sudo -n <cmd>                                            # normal path
-sudo-elevation request --for <DUR> --reason "<task>"     # GUI approval, user may change DUR
-sudo-elevation status [--porcelain]                      # remaining lease; --porcelain is KV for scripts
-sudo-elevation lock                                      # revoke cache and restore base window
-sudo-elevation parse <DUR>                               # debug duration spec
-```
+Elsewhere: `status [--porcelain]` for the remaining lease (KV, for scripts), `lock` to revoke and restore the base window, `parse <DUR>` to debug a duration spec.
 
-DUR: `90s` / `45m` / `2h` / `1d`, bare number = minutes, `until-lock` = infinite until lock.
-Single value + single unit only (`1m30s` invalid, use `90s`); unparseable specs fail immediately.
-Dialog times out in ~5min; expiry mid-task kills later `sudo -n`, so re-request.
+Without a GUI, ask the human to run `sudo -v` (base window @@BASE_HUMAN_EN@@ only) or `sudo-elevation grant --for 1h --reason "..."` (any duration). Never run `grant` yourself.
 
-## Duration
-
-You estimate `--for`; user overrides in dialog.
-
-- Attended (user waiting): short, e.g. `15m`; re-approve anytime.
-- Unattended: max needed, e.g. `2h`~`12h`; no second chance if it expires.
-- If `request` fails/times out and no human responds: stop and summarize, do not loop requests.
-- Typical: single install/restart `15m`; long download/build `2h`~`12h`. Avoid `until-lock` unless user agrees; it must be locked after use (verify `status` shows no lease).
-
-## No GUI
-
-Ask the human to run in their terminal (never run `grant` yourself):
-
-- `sudo -v` (base window @@BASE_HUMAN_EN@@ only)
-- `sudo-elevation grant --for 1h --reason "..."` (any duration)
-
-## Never
-
-- No `sudo -S`, `echo <pw> | sudo`, `expect`, or stored passwords.
-- No `/etc/sudoers*` edits or bypassing sudo-elevation.
-- Never ask for passwords; passwords go to system dialogs only.
-- Window, not command: any same-user process can sudo inside. Keep `--reason` <=60 chars, short and true (user sees it; spoofable; hard-truncated at 200).
+Never use `sudo -S`, `expect`, stored passwords, sudoers edits, or any other bypass, and never ask for a password: it belongs in a system dialog. A lease is a window, not a command -- any same-user process can sudo inside it. `--reason` is yours, not the user's: keep it <=60 chars and truthful, and assume it is spoofable, because the user sees it.
