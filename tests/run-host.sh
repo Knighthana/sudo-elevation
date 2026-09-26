@@ -241,12 +241,20 @@ grep -q '^# >>> sudo-elevation >>>$' "$SB/conflict/etc/sudo.conf" || die "block 
 ok "--force works"
 
 log "skill is English and concise"
-grep -q '^Rule: always try `sudo -n' "$SB/skill/SKILL.md" || die "skill not English"
+# The flow is a numbered list now, so anchor on step 1 rather than the old
+# "Rule:" lead-in: same intent (English, and sudo -n comes first), new shape.
+grep -q '^1\. Try `sudo -n <cmd>` first' "$SB/skill/SKILL.md" || die "skill not English"
 grep -q 'sudo-elevation request' "$SB/skill/SKILL.md" || die "skill missing request"
 grep -q '15 minutes' "$SB/skill/SKILL.md" || die "skill base not English"
 grep -qF '<=60' "$SB/skill/SKILL.md" || die "skill missing 60-char guidance"
 grep -qF 'do not loop requests' "$SB/skill/SKILL.md" || die "skill missing gone-user rule"
-ok "skill English"
+# The ownership marker the skill deletion guard keys on, plus the size budget
+# that motivated the rewrite: a skill is loaded into an agent's context on every
+# trigger, so growth here is a real cost, not a cosmetic one.
+grep -q 'Managed by sudo-elevation' "$SB/skill/SKILL.md" || die "skill missing ownership marker"
+_skill_bytes=$(wc -c < "$SB/skill/SKILL.md")
+[ "$_skill_bytes" -le 2000 ] || die "skill grew to $_skill_bytes bytes (budget 2000)"
+ok "skill English, marked, $_skill_bytes bytes"
 
 log "status --porcelain (no lease)"
 porc=$(se "$SE" status --porcelain)

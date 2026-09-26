@@ -174,6 +174,16 @@ sudo-elevation lock
   `lock` 无有效 timestamp 时会明确报错而非假装成功，此时请在有 tty 的终端补一次 `sudo .../restore --force` 或重 `lock`。
 - 适用场景：个人工作站/开发用 WSL 发行版；不适合共享或生产主机。
 
+**落盘足迹**：本项目尽量只往自有目录里写东西，让"哪些是我留下的"一眼可辨、
+故障排查范围可控。系统目录里我们全部的足迹可以用一条命令列出：
+
+```sh
+sudo grep -rl 'Managed by sudo-elevation' /etc /usr/local
+```
+
+新增落盘位置必须在自有目录内这条约束、当前基线足迹表，以及两处**已知冲突**
+（`/etc/sudo.conf` 的改写与 `.bak` 散落）都记在 [`docs/footprint.md`](docs/footprint.md)。
+
 ## 测试
 
 ```bash
@@ -302,12 +312,18 @@ sudo-elevation uninstall --keep       # 自动：显式 keep，供脚本使用�
   旧版残留备份只删严格自有格式（`bak.YYYYMMDDHHMMSS[.PID]`），管理员自有备份保留；
   `sudoers.d/90-sudo-elevation-*` 只删含 `Managed by sudo-elevation` 的自有渲染，手建同前缀文件保留并告警；
   `*.lease` 只删含 `epoch=` + `minutes=/restore=` 的自有租约，外来 `.lease` 保留；
-  `SKILL.md` 只删含 `sudo-elevation request` 的自有渲染；`CONFIG/LOG` 异形重定向不删。
+  `SKILL.md` 只删含 `Managed by sudo-elevation` 标记的自有渲染；`CONFIG/LOG` 异形重定向不删。
   安装剪枝同样只删自有严格形备份，管理员备份永留。
+  标记之前的旧版本渲染没有该标记，purge 会**保留**它并明确告知（不做模糊匹配，见
+  [`tools/README.md`](tools/README.md)）；需要清掉就跑 `tools/purge-legacy-skill.sh`（先报告，`--yes` 才删）。
 - `--no-system` 装/卸只动用户文件，系统部分打印 snippet 请管理员动手。
 
 ## 故障排查
 
+- **先划清"哪些是我的"**：一条 grep 列出系统目录里我们的全部足迹——
+  `sudo grep -rl 'Managed by sudo-elevation' /etc /usr/local`；
+  `/etc/sudo.conf` 里我们插入的块用 `sudo grep -n '>>> sudo-elevation' /etc/sudo.conf` 查。
+  完整足迹表见 [`docs/footprint.md`](docs/footprint.md)。
 - **弹窗不出现**：确认 `DISPLAY`/`WAYLAND_DISPLAY` 存在；WSL2 需要 WSLg（Win10 需 Store 版 WSL）。
 - **WSLg 下下拉菜单/鼠标交互异常**：WSLg 的 Wayland 合成器对 GTK4 弹窗输入处理有缺陷，
   默认已在 WSL 下强制 `GDK_BACKEND=x11`（走 XWayland）；仍异常时可在

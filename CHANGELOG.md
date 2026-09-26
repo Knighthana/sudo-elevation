@@ -36,6 +36,22 @@
   zenity 3.44.2 / X11）：`tests/manual/user-install-e2e.sh` 从安装、账户层生效、CLI 自带
   `SUDO_ASKPASS`、真弹窗、真认证、租约、双级审计、`lock` 回基窗，直到 purge 清到干净。
   跑之前先 `check` 确认干净状态，`--yes run` 全程约 1 分钟。不进 CI（需 root 且依赖真实 GUI）。
+- fix: **skill 删除守卫改用归属标记**。旧判据是子串 `sudo-elevation request`，方向错了：
+  第三方 skill 恰好提到这句话就会被删。现要求 `templates/SKILL.md.in` 渲染出的
+  `Managed by sudo-elevation` 标记——与 sudoers 备份守卫（`se_own_backup`）同一个 token，
+  于是 `sudo grep -rl 'Managed by sudo-elevation' /etc /usr/local` 一条命令就能列出
+  系统目录里我们的全部足迹。**故意不留向后兼容**：标记之前渲染的旧版本 purge 会保留它，
+  并明确告知去跑 `tools/purge-legacy-skill.sh`（先报告，`--yes` 才删），
+  而不是继续拿一个会误删他人文件的模糊判据。回归覆盖在 `17_preserve`。
+- perf: **SKILL.md 去重瘦身**（2231 → ~1750 字符，319 → ~272 词）。skill 每次触发都会进
+  agent 上下文，体积是实打实的成本，不是外观问题。删掉 6 处重复：Rule 行复述 Commands 块、
+  `15m` 出现两次、`2h~12h` 出现两次、5 分钟超时出现两次、"用户可改时长"出现两次、
+  "到期后重新申请"出现两次。保留：授权范围（任何同用户进程）、无 GUI 分支、失败停机条件、
+  reason 的可伪造性提醒，并补回 `until-lock` 到 DUR 列表（第 3 步要用它）。
+  `run-host.sh` 另加 2000 字节预算断言，防止以后无声回涨。
+- feat: 记录落盘足迹原则与基线到 `docs/footprint.md`：**新增落盘位置必须在自有目录内**，
+  `/etc` 只允许 sudo 强制集成点与单个具名文件。含一张自查表，并显式记下两处**已知冲突**
+  （`/etc/sudo.conf` 的外科式改写、`/etc/sudo.conf.bak.*` 散落）为待独立工作，不顺手改。
 - feat: `request` 加每账户互斥锁（`~/.cache/sudo-elevation/.request.lock`，基于 `mkdir`）。
   过去两个 agent 并发请求会互相覆盖 request 文件，弹窗描述的可能不是正在回答的那个请求。
   陈旧锁（> 弹窗超时 +120s，下限 300s+120s）自动接管，`DIALOG_TIMEOUT=0` 不会误抢。
