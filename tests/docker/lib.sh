@@ -60,3 +60,15 @@ wait_for_contains() { # file needle timeout
 	done
 	return 1
 }
+
+# Mirror of wait_for_contains for "the scheduled restore cleaned this up".
+# Polls every 1s and returns as soon as the path is gone; timeout is a safety
+# bound, not a fixed wait, so a fast machine does not pay the full timeout.
+wait_gone() { # path timeout
+	local path=$1 timeout=${2:-20} i
+	for ((i = 0; i < timeout; i++)); do
+		[ ! -e "$path" ] && return 0
+		sleep 1
+	done
+	return 1
+}

@@ -138,9 +138,7 @@ assert_contains /etc/sudo-elevation.conf "BASE_MINUTES=15"
 out=$(as_tester /usr/local/bin/sudo-elevation status)
 grep -qF '活动租约' <<<"$out" || die "stale lease display missing: $out"
 ok "stale lease shown until old restore fires"
-for _i in $(seq 1 20); do
-	[ ! -f /run/sudo-elevation/tester.lease ] && break
-	sleep 1
-done
+wait_gone /run/sudo-elevation/tester.lease 20 \
+	|| die "old restore did not clean up the stale lease"
 assert_no_file /run/sudo-elevation/tester.lease
 ok "old restore self-healed"
