@@ -1,7 +1,8 @@
 #!/bin/bash
 # sudo-elevation installer / uninstaller.
 #
-# Installs:
+# Installs (system layout; --user-install puts the same files under the
+# target user's XDG dirs instead, and skips the machine-global entries):
 #   /usr/local/bin/sudo-askpass                 GUI askpass helper
 #   /usr/local/bin/sudo-elevation               user CLI
 #   /usr/local/libexec/sudo-elevation/{grant,restore,common.sh}
@@ -9,6 +10,12 @@
 #   /etc/sudo.conf                              marker block: Path askpass ...
 #   /etc/sudoers.d/90-sudo-elevation-<user>     base timestamp_timeout
 #   ~/.config/opencode/skill/sudo-elevation/SKILL.md
+#
+# Ownership matters more than it looks: grant and restore are executed as root
+# through sudo, so they stay root-owned in EVERY layout. Only the two
+# user-space entry points (sudo-elevation, sudo-askpass) belong to the target
+# user, because those run as that user. Likewise `Path askpass` in sudo.conf is
+# machine-global and therefore only ever written by a system install.
 set -euo pipefail
 
 SELF_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -85,9 +92,13 @@ options:
   --max-timeout SPEC    maximum approvable lease (default 365d; non-build hosts: 12h/7d)
   --prefix DIR          install everything under DIR (testing/sandbox; not with --user-install)
   --user-install        XDG user layout: payload into ~/.local, config into
-                        ~/.config (no /usr/local pollution). System files
-                        (sudoers drop-in, sudo.conf marker) still need root
-                        unless --no-system is given.
+                        ~/.config (no /usr/local pollution). The per-user
+                        sudoers drop-in still needs root unless --no-system is
+                        given. Never writes the machine-global 'Path askpass'
+                        in sudo.conf: that is one setting for the whole host,
+                        so a user install would hand `sudo -A` to one account.
+                        The CLI finds its own helper via SUDO_ASKPASS instead,
+                        which means a bare `sudo -A` needs a system install.
   --no-system           never touch system directories (sudoers drop-in,
                         sudo.conf marker, /usr/local, /etc, /run, /var/log);
                         without --prefix this implies the --user-install
@@ -223,6 +234,9 @@ strip_test_hooks() {
 check_foreign_askpass() {
 	local tmp
 	[ "$NO_SYSTEM" = 1 ] && return 0
+	# A user install never writes Path askpass (see write_sudo_conf), so a
+	# foreign helper is none of its business.
+	[ "$USER_INSTALL" = 1 ] && return 0
 	[ -f "$SE_SUDO_CONF" ] || return 0
 	[ "$FORCE" = 1 ] && return 0
 	tmp=$(mktemp)
@@ -251,8 +265,33 @@ write_config() {
 	rm -f "$tmp"
 }
 
+# True when our marker block in $SE_SUDO_CONF points `Path askpass` into the
+# target user's own home. That is the hijack: a machine-global directive
+# handing `sudo -A` for every account on the box to one user. A block pointing
+# at a system path belongs to a system install and is none of our business.
+sudo_conf_hijacks_user() {
+	local home p
+	home=$(se_home_of "$TARGET_USER")
+	[ -n "$home" ] || return 1
+	p=$(awk '
+		/^# >>> sudo-elevation >>>/ { inb = 1; next }
+		/^# <<< sudo-elevation <<</ { inb = 0 }
+		inb && /^[[:space:]]*Path[[:space:]]+askpass[[:space:]]/ { print $3; exit }
+	' "$SE_SUDO_CONF" 2>/dev/null) || return 1
+	case "$p" in
+		"$home"/*) return 0 ;;
+	esac
+	return 1
+}
+
 write_sudo_conf() {
-	local tmp
+	local tmp want=1
+	# `Path askpass` is a machine-global sudo.conf directive: exactly one per
+	# host, and sudo honours it for every account. A user-channel install would
+	# point it into one user's ~/.local and thereby hand `sudo -A` for the whole
+	# box to that user, so user installs never write it.
+	[ "$USER_INSTALL" = 1 ] && want=0
+
 	tmp=$(mktemp)
 	if [ -f "$SE_SUDO_CONF" ]; then
 		strip_block < "$SE_SUDO_CONF" > "$tmp" \
@@ -260,24 +299,39 @@ write_sudo_conf() {
 	else
 		: > "$tmp"
 	fi
-	if [ "$FORCE" != 1 ] && grep -qE '^[[:space:]]*Path[[:space:]]+askpass([[:space:]]|$)' "$tmp"; then
+	# --no-system promises to touch nothing under /etc, so decide nothing here
+	# (and never trip the foreign-helper check for a file we won't write).
+	if [ "$NO_SYSTEM" = 1 ]; then
+		rm -f "$tmp"
+		SE_NEW_BAK=""
+		return 0
+	fi
+	# Nothing hijacking to undo and nothing to add: leave the admin's file
+	# alone instead of rewriting and backing it up for no reason.
+	if [ "$want" = 0 ] && ! sudo_conf_hijacks_user; then
+		rm -f "$tmp"
+		SE_NEW_BAK=""
+		return 0
+	fi
+	if [ "$want" = 1 ] && [ "$FORCE" != 1 ] \
+		&& grep -qE '^[[:space:]]*Path[[:space:]]+askpass([[:space:]]|$)' "$tmp"; then
 		rm -f "$tmp"
 		die "$SE_SUDO_CONF already configures a different askpass helper (use --force to take over)"
 	fi
-	{
-		printf '# >>> sudo-elevation >>>\n'
-		printf 'Path askpass %s\n' "$SE_BIN_DIR/sudo-askpass"
-		printf '# <<< sudo-elevation <<<\n'
-	} >> "$tmp"
+	if [ "$want" = 1 ]; then
+		{
+			printf '# >>> sudo-elevation >>>\n'
+			printf 'Path askpass %s\n' "$SE_BIN_DIR/sudo-askpass"
+			printf '# <<< sudo-elevation <<<\n'
+		} >> "$tmp"
+	fi
 	if [ "$DRY" = 1 ]; then
 		say "[dry-run] update $SE_SUDO_CONF (marker block)"
 		rm -f "$tmp"
 		return 0
 	fi
-	if [ "$NO_SYSTEM" = 1 ]; then
-		rm -f "$tmp"
-		SE_NEW_BAK=""
-		return 0
+	if [ "$want" = 0 ]; then
+		say "removed our machine-global 'Path askpass' from $SE_SUDO_CONF: it pointed sudo -A at $TARGET_USER's home, handing it to every account"
 	fi
 	if [ -f "$SE_SUDO_CONF" ]; then
 		# Backup names carry PID so two installs within the same second
@@ -305,7 +359,7 @@ write_sudo_conf() {
 	rm -f "$tmp"
 }
 
-# Root snippet for --no-system: the two blocks an admin must apply.
+# Root snippet for --no-system: what an admin still has to apply by hand.
 print_system_snippet() {
 	local dest
 	dest="$SE_SUDOERS_DIR/90-sudo-elevation-$(se_user_slug "$TARGET_USER")"
@@ -314,6 +368,15 @@ print_system_snippet() {
 	say "  1) sudoers drop-in $dest :"
 	say "       Defaults:$TARGET_USER timestamp_type=global"
 	say "       Defaults:$TARGET_USER timestamp_timeout=$BASE_MINUTES"
+	if [ "$USER_INSTALL" = 1 ]; then
+		say "  2) nothing to do in $SE_SUDO_CONF."
+		say "     Do NOT add 'Path askpass' there for a user install: the directive is"
+		say "     machine-global, so it would hand 'sudo -A' for EVERY account to"
+		say "     $TARGET_USER's ~/.local. 'sudo-elevation request/grant' already point"
+		say "     sudo at this tree's own helper; a bare 'sudo -A' needs a root"
+		say "     (system-channel) install instead."
+		return 0
+	fi
 	say "  2) append to $SE_SUDO_CONF :"
 	say "       # >>> sudo-elevation >>>"
 	say "       Path askpass $SE_BIN_DIR/sudo-askpass"
@@ -522,16 +585,37 @@ write_receipt() {
 	say "installed receipt: $target"
 }
 
+# grant/restore are executed as root through sudo, so they must never be
+# writable by the target user: a user-owned copy is a root-code injection
+# point the moment an admin narrows sudo to that one path. An older installer
+# `chown -R`'d the whole libexec tree; put anything it touched back and say so.
+reclaim_root_payload() {
+	local f owner bad=0
+	for f in "$SE_LIBEXEC"/*; do
+		[ -e "$f" ] || continue
+		owner=$(stat -c %U "$f" 2>/dev/null || printf root)
+		[ "$owner" = root ] && continue
+		say "reclaiming root ownership of $f (an older installer chowned the libexec tree to $TARGET_USER)" >&2
+		chown root:root "$f" 2>/dev/null || true
+		bad=1
+	done
+	[ "$bad" = 1 ] || return 0
+	say "note: $SE_LIBEXEC runs as root via sudo, so it has to stay root-owned; only" >&2
+	say "      the user-space entry points ($SE_BIN_DIR/sudo-elevation, sudo-askpass) belong to $TARGET_USER" >&2
+}
+
 # In user mode the payload belongs to the target user even when root runs
 # the installer (se_install_file would otherwise chown root). Only our own
-# files are touched: never chown -R a shared dir like ~/.local/bin.
+# files are touched: never chown -R a shared dir like ~/.local/bin. Only the
+# two user-space entry points change hands -- the CLI needs the root-owned
+# libexec read+executable, which is all root:root 0755/0644 provides.
 chown_user_payload() {
 	[ "$USER_INSTALL" = 1 ] || return 0
 	[ "$(id -u)" = 0 ] || return 0
 	[ "$DRY" = 1 ] && return 0
 	chown "$TARGET_USER" "$SE_BIN_DIR/sudo-askpass" "$SE_BIN_DIR/sudo-elevation" 2>/dev/null || true
-	chown -R "$TARGET_USER" "$SE_LIBEXEC" "$SE_SHARE" 2>/dev/null || true
 	chown "$TARGET_USER" "$SE_CONFIG" 2>/dev/null || true
+	reclaim_root_payload
 }
 
 # Our own sudoers drop-ins carry this header (see se_render_sudoers).

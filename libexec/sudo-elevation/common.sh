@@ -217,6 +217,45 @@ se_valid_user() {
 	esac
 }
 
+# Multi-user boundary for the root-side helpers. Reached through sudo by an
+# unprivileged account, a helper may act ONLY on that account. Without this
+# check anyone able to run `sudo .../grant` could rewrite another account's
+# sudo window and lease by passing `--user someone-else`.
+# Two cases stay allowed because no privilege boundary was crossed: the helper
+# invoked directly by root (no SUDO_USER), and root running it through sudo
+# (SUDO_USER=root, i.e. root already had the power in the first place).
+se_assert_target_user() { # tool user
+	local tool=$1 user=$2 caller=${SUDO_USER:-}
+	[ -n "$caller" ] || return 0
+	if [ "$caller" = root ] || [ "$user" = "$caller" ]; then
+		return 0
+	fi
+	printf '%s: refusing --user %s: invoked via sudo by %s, so it may only act on itself\n' \
+		"$tool" "$user" "$caller" >&2
+	printf '%s: (run this helper as root to act on another account)\n' "$tool" >&2
+	return 1
+}
+
+# Root parses the config file, so a caller must not be able to point
+# --config-file at policy it controls. Trusted = owned by root and not
+# writable by group/other, or owned by the target user (their own layer).
+# Rejected means: someone other than the owner can rewrite the approval
+# ceiling, the dialog timeout or the GUI backend underneath root's feet.
+se_config_trusted() { # file user
+	local f=${1-} user=${2-} syms owner
+	[ -n "$f" ] && [ -f "$f" ] || return 1
+	# Symbolic mode beats octal here: the group/other write bits are two
+	# named characters, so there is no octal arithmetic to get wrong.
+	syms=$(stat -c %A "$f" 2>/dev/null) || return 1
+	[ "${#syms}" -ge 10 ] || return 1
+	case "${syms:5:1}" in w) return 1 ;; esac   # group-write
+	case "${syms:8:1}" in w) return 1 ;; esac   # other-write
+	owner=$(stat -c %U "$f" 2>/dev/null) || return 1
+	[ "$owner" = root ] && return 0
+	[ -n "$user" ] && [ "$owner" = "$user" ] && return 0
+	return 1
+}
+
 # se_version_ge "version line" MIN -> 0 when version >= MIN.
 # Accepts full `sudo -V` first lines ("Sudo version 1.9.15p5",
 # "sudo version 1.8.16"); a trailing pN patch level is ignored.

@@ -20,7 +20,11 @@ ok "user layout, system payload untouched"
 assert_eq "$(stat -c %U /home/tester/.local/bin/sudo-elevation)" tester "payload owned by user"
 assert_eq "$(stat -c %U /home/tester/.config/sudo-elevation/config)" tester "config owned by user"
 assert_contains /etc/sudoers.d/90-sudo-elevation-tester "timestamp_timeout=15"
-assert_contains /etc/sudo.conf "Path askpass /home/tester/.local/bin/sudo-askpass"
+# A user install must NOT claim the machine-global `Path askpass`: it would
+# hand `sudo -A` for every account to this user's ~/.local. The CLI points
+# sudo at its own helper instead (see 19_multiuser.sh).
+assert_not_contains /etc/sudo.conf "Path askpass /home/tester/.local/bin/sudo-askpass"
+assert_not_contains /etc/sudo.conf "sudo-askpass"
 grep -q 'INSTALL_MODE=user' /home/tester/.local/share/sudo-elevation/manifest || die "manifest mode"
 grep -q 'SYSTEM=1' /home/tester/.local/share/sudo-elevation/manifest || die "manifest system flag"
 ok "system step applied + manifest"
@@ -63,7 +67,7 @@ assert_no_file /home/tester/.local/bin/sudo-askpass
 assert_file /home/tester/.config/sudo-elevation/config
 assert_file /home/tester/.local/share/sudo-elevation/manifest
 assert_contains /etc/sudoers.d/90-sudo-elevation-tester "timestamp_timeout=15"
-assert_contains /etc/sudo.conf "Path askpass /home/tester/.local/bin/sudo-askpass"
+assert_not_contains /etc/sudo.conf "sudo-askpass"
 if runuser -u tester -- sudo -n true >/dev/null 2>&1; then die "cache survived keep"; fi
 ok "keep: payload gone, config kept, lease ended"
 

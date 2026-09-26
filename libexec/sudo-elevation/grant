@@ -45,9 +45,18 @@ done
 [ -n "$user" ] || user=${SUDO_USER:-}
 se_valid_user "$user" || { echo "grant: missing or invalid --user" >&2; exit 2; }
 id "$user" >/dev/null 2>&1 || { echo "grant: no such user: $user" >&2; exit 2; }
+se_assert_target_user grant "$user" || exit 2
 
 if [ -n "$config_file" ]; then
-	[ -f "$config_file" ] || { echo "grant: config file not found: $config_file" >&2; exit 2; }
+	# A MISSING config is not an error: every key has a default and se_load_config
+	# already tolerates absence. The CLI passes this path unconditionally, so being
+	# strict here made `request` fail with "config file not found" the moment someone
+	# deleted the file. An EXISTING but untrusted file is still refused.
+	if [ -e "$config_file" ] && ! se_config_trusted "$config_file" "$user"; then
+		echo "grant: refusing to load $config_file: it must be owned by root" \
+			"(and not group/world writable) or by $user" >&2
+		exit 2
+	fi
 	# shellcheck disable=SC2034  # consumed by se_load_config below
 	SUDO_ELEVATION_CONFIG=$config_file
 fi

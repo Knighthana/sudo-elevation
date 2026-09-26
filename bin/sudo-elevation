@@ -16,6 +16,18 @@ ME=$(id -un)
 GRANT_BIN="$SE_LIBEXEC/grant"
 RESTORE_BIN="$SE_LIBEXEC/restore"
 
+# sudo resolves the askpass helper from SUDO_ASKPASS, and `Path askpass` in
+# sudo.conf is machine-global (one per host, honoured for every account). A
+# user-channel helper is therefore reachable ONLY through this variable, so
+# supply our own tree's copy when the caller has not picked one. Because the
+# CLI self-locates, this always names the helper from the same tree as the CLI
+# itself -- no $PATH guessing, no global file, no shell profile.
+# Fallback, never an override: an explicit SUDO_ASKPASS still wins, which is
+# what the test-suite's fake helpers and any deliberate user choice rely on.
+if [ -z "${SUDO_ASKPASS:-}" ] && [ -x "$SE_BIN_DIR/sudo-askpass" ]; then
+	export SUDO_ASKPASS="$SE_BIN_DIR/sudo-askpass"
+fi
+
 usage() {
 	cat <<'EOF'
 usage: sudo-elevation <command> [options]

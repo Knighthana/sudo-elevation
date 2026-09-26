@@ -27,9 +27,15 @@ done
 
 [ "$(id -u)" = 0 ] || { echo "restore: must run as root" >&2; exit 1; }
 se_valid_user "$user" || { echo "restore: missing or invalid --user" >&2; exit 2; }
+se_assert_target_user restore "$user" || exit 2
 
 if [ -n "$config_file" ]; then
-	[ -f "$config_file" ] || { echo "restore: config file not found: $config_file" >&2; exit 2; }
+	# Missing is fine (defaults apply); existing but untrusted is not. See grant.
+	if [ -e "$config_file" ] && ! se_config_trusted "$config_file" "$user"; then
+		echo "restore: refusing to load $config_file: it must be owned by root" \
+			"(and not group/world writable) or by $user" >&2
+		exit 2
+	fi
 	# shellcheck disable=SC2034  # consumed by se_load_config below
 	SUDO_ELEVATION_CONFIG=$config_file
 fi

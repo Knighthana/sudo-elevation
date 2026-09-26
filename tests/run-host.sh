@@ -186,6 +186,45 @@ out=$(se "$SE" parse 1m30s 2>&1 || true)
 grep -qF '90s' <<<"$out" || die "composite hint missing: $out"
 ok "strict config"
 
+log "se_config_trusted only trusts non-group/world-writable files"
+bash -c '
+	. "$1/libexec/sudo-elevation/common.sh" || exit 1
+	me=$(id -un)
+	printf "x\n" > "$2/trust.conf" || exit 1
+	for m in 600 400 644 640 750 4755 2755; do
+		chmod "$m" "$2/trust.conf"
+		se_config_trusted "$2/trust.conf" "$me" || { echo "mode $m wrongly rejected" >&2; exit 1; }
+	done
+	for m in 660 666 664 606 777 1777; do
+		chmod "$m" "$2/trust.conf"
+		if se_config_trusted "$2/trust.conf" "$me"; then echo "mode $m wrongly trusted" >&2; exit 1; fi
+	done
+	chmod 0644 "$2/trust.conf"
+	# Owner must be root or the target user, nobody else.
+	se_config_trusted "$2/trust.conf" root && { echo "non-root file trusted as root-owned" >&2; exit 1; }
+	se_config_trusted "$2/trust.conf" "" && { echo "non-root file trusted with no user" >&2; exit 1; }
+	se_config_trusted "$2/trust.conf" "somebody-else" && { echo "third-party file trusted" >&2; exit 1; }
+	se_config_trusted "$2/nope.conf" "$me" && { echo "missing file trusted" >&2; exit 1; }
+	rm -f "$2/trust.conf"
+	exit 0
+' _ "$REPO" "$SB" || die "se_config_trusted"
+ok "config trust predicate"
+
+log "se_assert_target_user blocks cross-account helpers, not root"
+bash -c '
+	. "$1/libexec/sudo-elevation/common.sh" || exit 1
+	# Not reached through sudo: root may target anyone.
+	( unset SUDO_USER; se_assert_target_user grant bob ) || exit 1
+	( export SUDO_USER=root;  se_assert_target_user grant bob ) || exit 1
+	( export SUDO_USER=alice; se_assert_target_user grant alice ) || exit 1
+	( export SUDO_USER=alice; se_assert_target_user grant bob ) 2>/dev/null && exit 1
+	( export SUDO_USER=alice; se_assert_target_user restore bob ) 2>/dev/null && exit 1
+	out=$(SUDO_USER=alice se_assert_target_user grant bob 2>&1) || true
+	grep -qF "refusing --user bob" <<<"$out" || exit 1
+	exit 0
+' _ "$REPO" || die "se_assert_target_user"
+ok "cross-account boundary predicate"
+
 log "uninstall --dry-run touches nothing"
 touch "$SB/root/etc/sudo.conf.bak.20990101000000"
 "$REPO/install.sh" --prefix "$SB/root" --user "$ME" --skill-dir "$SB/skill" --uninstall --dry-run >/dev/null
