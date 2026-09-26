@@ -66,6 +66,46 @@ sudo ./install.sh                 # 默认用户 $SUDO_USER，基础窗口 15m
 > **KDE 用户注意**：kdialog 分支仅做过参数 stub 测试，无 KDE 真机验证；弹窗超时由 `timeout(1)`
 > 按 `DIALOG_TIMEOUT` 强制（与 zenity 对齐），渲染效果未经眼看，长时间无响应请直接关闭窗口或改用终端 `grant`。
 
+## 配置
+
+两个配置层，后者覆盖前者：
+
+| 层 | 路径 | 属主 | 作用范围 |
+|---|---|---|---|
+| 机器层 | `/etc/sudo-elevation.conf` | root | 整台机器的默认策略 |
+| 账户层 | `~/.config/sudo-elevation/config` | 该用户 | 只影响该账户，**与用哪棵树无关** |
+
+优先级：**命令行参数 > 账户层 > 机器层 > 内置默认值**。
+
+```bash
+# 机器级（root）
+printf 'MAX_MINUTES=720\nGUI_BACKEND=wayland\n' | sudo tee /etc/sudo-elevation.conf
+
+# 账户级：自己收紧审批上限，不必动 root 的文件
+mkdir -p ~/.config/sudo-elevation
+printf 'MAX_MINUTES=60\n' > ~/.config/sudo-elevation/config
+```
+
+可配置键（数值单位为分钟，允许小数）：
+
+| 键 | 默认 | 含义 |
+|---|---|---|
+| `BASE_MINUTES` | 15 | 基础窗口（无活动租约时每次 `sudo` 仍要密码，超时后回到此窗口） |
+| `MAX_MINUTES` | 525600 | 单次可批准的最大时长；上限硬性封顶 525600（一年） |
+| `DIALOG_TIMEOUT` | 300 | 弹窗无响应超时（0 表示不限） |
+| `REQUEST_TTL` | 300 | `request` 缓存文件有效期 |
+| `GUI_BACKEND` | auto | `auto\|x11\|wayland`，即 `GDK_BACKEND` |
+
+要点：
+
+- **重装不会丢配置。** 不带 `--base-timeout/--max-timeout` 重装时，已有值原样保留；
+  显式传 flag 才覆盖对应键。根目录的 `BASE_MINUTES` 还会同步到 sudoers drop-in，
+  不会出现「配置写 25m、sudoers 还是 15m」的不一致。
+- **每次弹窗实时读取**，改完无需重装，也不会被写回覆盖。
+- 手写错的数值（非数字、超范围、`BASE > MAX`）会被拒绝安装并报错；只是「不像数字」的
+  值按内置默认回落（fail-safe）。
+- 装用户通道时，账户层就是被安装器管理的那个文件，不存在“机器层”。
+
 ## 使用
 
 ### agent（通过 skill 指引）
@@ -99,12 +139,18 @@ sudo-elevation lock
   只清本次缓存，**配置仍为 `-1`**，下次任意密码认证会直接获得无限期免密，必须补一次 `lock`。
 - **租约结束一律清理 sudo 缓存**，避免短租约“漏”出基础窗口的剩余时间。
 - **裸 `sudo -A`**（不走 request）：简单密码弹窗，按基础窗口授权。
-- **审计**：`/var/log/sudo-elevation.log` 只记录租约的 grant/restore（请求者/原因/请求与批准时长/恢复方式），
+- **审计**：只记录租约的 grant/restore（请求者/原因/请求与批准时长/恢复方式），写两处：
+  机器级 `/var/log/sudo-elevation.log`（root 0600，混记所有账户、带 `actor=`）与账户级
+  `~/.local/state/sudo-elevation/audit.log`（同一行，账户自有 0600，用户可自己看）。
+  两者都**不自动轮转**，长期运行请自行配 logrotate。
   窗口内实际执行的 sudo 命令不在本项目审计范围，如需溯源请另配 sudo `log_input`/`log_output`。
+- **并发**：同一账户同时只允许一个 `request` 等待审批（`~/.cache/sudo-elevation/.request.lock`）；
+  第二个会直接报错退出，不会覆盖第一个的请求内容。陈旧锁（超过弹窗超时 +120s）自动接管。
 - **原因长度**：`--reason` 建议 60 字以内（弹窗可读），超 200 字必截断并告警。
 - **何时可以离开**：`request` 批准成功即可离开（唯一阻塞点≤5 分钟）；`lock` 成功即可离开；
   `lock` 报错失败必须留下处理，`until-lock` 尤其如此。
 - **重装建议**：重装会重置 sudoers 到基础窗口，但活动租约的显示要等旧恢复任务自愈；重装前建议先 `lock`。
+  重装**不会**覆盖已有配置（除非显式传 `--base-timeout/--max-timeout`），也不会动账户层。
 - **无 GUI/无 tty**：弹窗失败会快速报错而不是挂起；请改用终端 `grant`。
 - **申请阻塞**：图形时长+密码弹窗总超时约 5 分钟（`DIALOG_TIMEOUT`），无人值守请按最长可能时间估足，
   用户 5 分钟不响应则本次申请作废，需重新 `request`。
@@ -168,14 +214,55 @@ sudo ./install.sh --user-install --user alice     # payload 进 ~/.local，配�
 - 布局：可执行文件 `~/.local/bin`、libexec `~/.local/libexec`、数据 `~/.local/share`、
   配置 `~/.config/sudo-elevation/config`、skill 照常、`~/.config/sudo-elevation/env` 记录路径。
 - CLI 靠该 receipt 自动定位，无需 export；root 侧 helper 由 CLI 显式传递 `--config-file`。
-- sudoers drop-in 与 `sudo.conf` marker 仍是系统文件：要么 root 装，要么 `--no-system`
-  跳过并打印管理员 snippet（未应用前工具 inert）。root 代装时 payload 属主归目标用户。
+- **askpass 由 CLI 自己解决**：sudo 只能从 `SUDO_ASKPASS` 环境变量或 sudo.conf 的
+  `Path askpass` 找弹窗程序，而后者是**机器级、每台机器只有一个、对所有账户生效**。
+  所以用户安装**不写** `Path askpass`（否则等于把全机 `sudo -A` 交给某个用户的家目录）；
+  改为 `sudo-elevation` 在调用 `sudo -A` 前自行导出 `SUDO_ASKPASS` 指向本树。
+  这只影响 CLI 自己的调用——**裸 `sudo -A <cmd>` 仍需 root 装系统通道**。
+  显式设置过 `SUDO_ASKPASS` 的用户不会被覆盖。
+- sudoers drop-in 仍是系统文件（按用户切片，`/etc/sudoers.d/90-sudo-elevation-<user>`）：
+  要么 root 装，要么 `--no-system` 跳过并打印管理员 snippet（未应用前工具 inert）。
 - `--no-system` 的含义就是不动任何系统目录（`/usr/local`、`/etc`、`/run`、
   `/var/log` 都不碰）：不带 `--prefix` 时自动采用目标用户的 XDG 布局，
   root 执行则装进 root 自己的家目录；卸载时按 manifest 记录的布局清理。
 - 卸载：CLI（`sudo-elevation uninstall`）按 manifest 自动补齐缺失 flags；
   直接调 `install.sh --uninstall` 则布局 flags 需显式给全（`--user-install/--no-system/--prefix/--user/--skill-dir`），
   只告警不自动补（`PREFIX` 不符会明确警告）。
+
+## 多用户 / 服务器
+
+同一台机器上多个账户各自使用时，边界如下（均已在代码里强制，不只是文档约定）：
+
+- **root helper 只作用于调用者自己**。`grant`/`restore` 经 sudo 被调用时，
+  `--user` 必须等于 `$SUDO_USER`；否则拒绝（防止 `sudo .../grant --user 别人` 改写他人窗口）。
+  root **直接**运行（不经 sudo，或 root 自己 `sudo`）时可指定其他账户。
+- **root 只加载可信配置**。`--config-file` 指向的文件必须 root 拥有且非组/全局可写，
+  或属于目标用户；否则拒绝。避免调用者自选 `MAX_MINUTES` 绕过机器策略。
+- **root 运行的代码永远 root 属主**。`grant`/`restore`/`common.sh` 即使用户安装也
+  保持 `root:root`——CLI 只需要可读可执行。旧版本 `chown -R` 留下的非 root 属主
+  会在下次安装时收回并告警。
+- **sudoers drop-in 按用户切片**，租约文件 `/run/sudo-elevation/<user>.lease` 为 0600
+  属该用户；A 的租约与 `lock` 不影响 B。
+- **审批上限 `MAX_MINUTES` 默认是机器级的**（`/etc/sudo-elevation.conf`）：一户调整会影响全机。
+  要按账户收紧，让该用户写自己的 `~/.config/sudo-elevation/config`（账户层优先，
+  且与他人的配置互不影响）。
+- **`timestamp_type=global`**：租约会同时授权该用户的所有会话（含 tmux/screen），
+  这是设计意图，但共享会话的服务器上要知道这一点。
+- **卸载只作用于自己**。默认只处理 `--user` 指定的账户；只要 manifest 里还有别的账户在用，
+  共享的 payload / `sudo.conf` marker / 机器配置就**保留不动**，以免把别人的 `sudo -A` 弄坏。
+  确认整机下线时才用 `--all-users`。账户被移除后 manifest 的 `USERS` 会同步更新，
+  否则机器永远清不干净。
+- **审计**：机器级 `/var/log/sudo-elevation.log`（root 0600，混记所有账户、带 `actor=`）
+  + 账户级 `~/.local/state/sudo-elevation/audit.log`（同一行、账户自有 0600，用户可自己读）。
+  两者均无自动轮转。
+- **用户名里的 `.` 和 `_` 曾共用文件**。旧的 slug 映射把 `a.b` 和 `a_b` 都变成 `a_b`，
+  两个账户共用一份 sudoers drop-in 和一份租约，可以互相结束窗口、覆盖时长。
+  现已改为单射编码（`a.b` → `a__2e__b`）；不含 `.`/`_` 的普通用户名不变，
+  旧名残留文件在下次授权时自动清理。
+- **`/run` 是 tmpfs**：租约文件与自动恢复任务重启即失，`until-lock` 也不例外。
+- **未覆盖**：`grant`/`restore` 需要调用者**已有宽权限 sudo**（项目只写 `Defaults:`，
+  从不写命令规则、不碰 `NOPASSWD`）。给账户限定 `apt, systemctl` 之类时，
+  图形 `request` 不可用——见下方故障排查。
 
 ## 卸载（包管理器式两档）
 
@@ -209,8 +296,14 @@ sudo-elevation uninstall --keep       # 自动：显式 keep，供脚本使用�
 - **弹窗不出现**：确认 `DISPLAY`/`WAYLAND_DISPLAY` 存在；WSL2 需要 WSLg（Win10 需 Store 版 WSL）。
 - **WSLg 下下拉菜单/鼠标交互异常**：WSLg 的 Wayland 合成器对 GTK4 弹窗输入处理有缺陷，
   默认已在 WSL 下强制 `GDK_BACKEND=x11`（走 XWayland）；仍异常时可在
-  `/etc/sudo-elevation.conf` 调整 `GUI_BACKEND=auto|x11|wayland`（改完重装生效）。
+  `/etc/sudo-elevation.conf` 调整 `GUI_BACKEND=auto|x11|wayland`。
+  该文件**每次弹窗实时读取，改完无需重装**；若租约/时间戳仍有效，sudo 压根不会调
+  askpass，先 `sudo -k`（或 `sudo-elevation lock`）再试。
 - `libEGL warning ... ZINK ...`：WSLg 无 GPU 直通的软件渲染提示，可忽略。
+- **`request` 报“不在 sudoers 允许范围内 / not allowed to execute”**：本项目只写
+  `Defaults:`（时间窗），**从不写命令规则、不碰 `NOPASSWD`**，所以它要求你**已有宽权限
+  sudo**。sudoers 被限定到少数命令的账户无法运行 `grant`/`request`，请改用已有的
+  宽权限账户，或由管理员放宽（放宽时请注意 `grant` 必须保持 root 属主不可写）。
 - **`request` 报“没有可用的图形界面”**：用终端 `sudo -v`（仅基础窗口）或
   `sudo-elevation grant --for N --reason "..."`（终端审批任意时长，见 `grant --help`）。
 - **恢复任务**：systemd 用 `systemd-run`；WSL/容器用后台 `setsid` 进程；

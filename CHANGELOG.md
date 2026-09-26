@@ -2,6 +2,84 @@
 
 ## Unreleased (breaking: bare uninstall is now interactive)
 
+- security: **卸载只作用于目标账户**。过去 `do_uninstall` 会遍历 manifest 里所有账户，
+  于是共享主机上任意一户执行 `uninstall --purge` 就会结束其他所有户的租约、把他们的
+  sudoers 打回基窗、删掉他们的 skill。现在默认只处理 `--user`；只要还有别的账户在用，
+  共享的 payload / `sudo.conf` marker / 机器配置 / 备份 / ghost sweep 全部保留。
+  整机下线用新增的 `--all-users` 显式声明。账户被移除后同步更新 manifest 的 `USERS`，
+  否则机器永远清不干净。
+- security: `se_user_slug` 改为**单射**。旧的 `tr -c 'A-Za-z0-9_-' _` 把 `a.b` 和 `a_b`
+  都映射成 `a_b`，两个合法账户共用一份 sudoers drop-in 与一份租约——可以互相结束窗口、
+  读取对方原因、覆盖对方时长（AD/Domuan 等带点用户名必然踩到）。现转义 `.` 与 `_`
+  （`a.b` → `a__2e__b`），普通用户名不变，旧名残留文件在下次授权时自动清理。
+- fix: `--config-file` 指向的配置文件**不存在时不再报错**。CLI 无条件传该路径，因此过去
+  用户一删配置，`request` 就以 “config file not found” 全面失败；现在按默认值回落。
+  文件存在但属主不可信时仍然拒绝。
+- feat: **审计两级**。root 侧 `se_audit` 在写完机器日志后，用 `runuser` 以目标账户身份
+  把**同一行**追加到 `~/.local/state/sudo-elevation/audit.log`（账户自有 0600）。
+  由账户自己创建而非 chown 进家目录，写失败绝不影响授权；机器日志仍为 root 0600。
+- feat: `sudo-elevation status` 暴露来源：`cli=`（本次生效的树）、`askpass=`、
+  参与解析的 `config[层]=路径`、以及每个键的 `src_*`（`default` / `machine:` / `user:`）。
+  解决“同一台机器装了系统通道和用户通道时，`$PATH` 决定谁应答却毫无提示”的盲区。
+- fix: `status` 不再靠 `sudo -n grep` 读 0440 的 sudoers drop-in（无有效时间戳时必然失败，
+  恰好在无租约时 `current_timeout` 为空）。改为读用户本就可读的租约文件 `minutes` 键。
+- feat: `request` 加每账户互斥锁（`~/.cache/sudo-elevation/.request.lock`，基于 `mkdir`）。
+  过去两个 agent 并发请求会互相覆盖 request 文件，弹窗描述的可能不是正在回答的那个请求。
+  陈旧锁（> 弹窗超时 +120s，下限 300s+120s）自动接管，`DIALOG_TIMEOUT=0` 不会误抢。
+- feat: 授权失败时给出可执行提示：本项目只写 `Defaults`、从不写命令规则与 `NOPASSWD`，
+  因此 scoped-sudo 账户不可用属预期行为，并说明放宽权限时必须保持 `grant` 为 root 属主。
+- tests: 新增 `20_lifecycle`（双账户独立卸载、共享 payload 保留到最后一人、
+  `--all-users`、带点用户名不再共用文件）；`19_multiuser` 增补配置分层、status 去 sudo
+  依赖与来源、并发锁、陈旧锁接管、删配置后仍可用、两级审计落位与属主。
+
+- feat: **配置分层**——机器层 `/etc/sudo-elevation.conf` 与账户层
+  `~/.config/sudo-elevation/config`，后者优先且**与用哪棵树无关**（系统通道的 CLI 同样
+  遵守账户层）。优先级：命令行 flag > 账户层 > 机器层 > 内置默认。两侧路径都是既有路径，
+  零迁移。root 侧 helper 按 `SUDO_USER` 解析账户层（非 root 侧直接用 `$HOME`，
+  在 `--prefix` 沙箱下整个账户层停用以保持测试封闭）。
+- fix: **重装不再清空配置**。`write_config` 过去无条件重写整个文件，把手改的
+  `GUI_BACKEND`/`DIALOG_TIMEOUT`/`REQUEST_TTL`/`BASE_MINUTES`/`MAX_MINUTES` 全部打回
+  flag 默认值。现在不传 `--base-timeout/--max-timeout` 时原样保留，显式传 flag 才覆盖
+  对应键；新键仍会补全，文件保持自解释。README 里“改完重装生效”的说法是错的
+  （该文件每次弹窗实时读取），已删除。
+- fix: 基础窗口的解析提前到 `do_install` 第一句。此前 `BASE_MINUTES` 只在写配置文件时
+  生效，sudoers drop-in / manifest / 摘要 / SKILL.md 用的仍可能是 flag 默认值，
+  会出现“配置写 25m、sudoers 还是 15m”。现在解析结果贯穿所有消费点。
+- fix: 账户层的值不会被写进机器文件（否则把一户偏好固化成全机策略），同时机器层自己的
+  值也不会因为恰好有账户覆盖而被删掉——需要区分“本文件管理的键”和“别人的键”。
+- fix: 手写配置现在会校验：超出硬上限（`MAX_MINUTES` 封顶一年，此前
+  `se_valid_minutes` 拿 max 校验 max 等于没校验）、`BASE > MAX` 一律拒绝安装并报错，
+  且拒绝时不留下半改写的配置。
+- docs: README 新增「配置」章节（分层表、优先级、可配置键、重装不丢配置）。
+
+- security: `grant`/`restore` 只作用于调用者自己——经 sudo 时 `--user` 必须等于
+  `$SUDO_USER`，否则拒绝。修掉 `sudo .../grant --user <别人> --minutes <任意>`
+  即可改写他人 sudo 窗口与租约的跨用户提权。root **直接**运行（不经 sudo，或
+  root 自己 sudo）仍可指定其他账户，因为那条路径没有跨越权限边界。
+- security: root 侧 helper 加载 `--config-file` 前校验属主——必须 root 拥有且非
+  组/全局可写，或属于目标用户，否则拒绝。调用者不能再自选 `MAX_MINUTES`
+  绕过机器策略。符号模式位判定（`stat -c %A`），不做八进制运算。
+- security: **用户安装不再写全局 `Path askpass`**。该指令每台机器只有一个且对
+  所有账户生效，`--user-install` 曾把全机 `sudo -A` 指向某个用户的 `~/.local`；
+  `print_system_snippet` 甚至把它印成推荐做法。现改为 `sudo-elevation` 在调用
+  `sudo -A` 前自行导出 `SUDO_ASKPASS` 指向本树（仅在调用方未设置时，纯兜底，
+  不覆盖显式值），因此用户通道图形路径可用而裸 `sudo -A` 仍需系统通道。
+  旧版留下的、指向目标用户家目录的 marker 块会被清理并备份；指向系统路径的
+  块（属于系统安装）不动。
+- security: `grant`/`restore`/`common.sh`/`$SE_SHARE` 在**所有**布局下保持
+  `root:root`——删掉了 `chown -R "$SE_LIBEXEC"`。这两个 helper 经 sudo 以 root
+  执行，交给目标用户就等于交出 root 代码注入点。CLI 只需可读可执行。
+  旧安装残留的非 root 属主文件在下次安装时收回并告警。
+- docs: README 新增「多用户 / 服务器」小节（边界、机器级 `MAX_MINUTES`、
+  `timestamp_type=global` 的会话扩散、审计日志归属）；故障排查补 scoped-sudo
+  不兼容（项目只写 `Defaults:`，从不写命令规则）与 `GUI_BACKEND` 改完**无需重装**
+  （每次弹窗实时读取；租约有效时 sudo 不调 askpass，需先 `sudo -k`/`lock`）。
+- tests: 新增 `19_multiuser`（跨用户 grant/restore 被拒、root 直跑仍可用、
+  第三方/全局可写配置被拒、用户安装不劫持 askpass、旧块清理、libexec 属主、
+  CLI 兜底 `SUDO_ASKPASS` 生效且不覆盖显式值）；host 增 `se_config_trusted`
+  权限位真值表与 `se_assert_target_user` 边界单测；`16_user_install` 改为断言
+  修复后的行为（不再出现 `Path askpass ~/.local/...`）。
+
 - change: 不带参数的 `uninstall`（CLI 与 `install.sh`）改为互动模式——列出 receipt/manifest/
   系统痕迹三层发现的每一棵安装，逐棵确认 keep/purge/skip（5 分钟无应答按跳过）；
   无 tty 时只列出精确命令并以非零退出，不删任何东西。脚本请改用显式参数。

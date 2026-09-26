@@ -458,13 +458,47 @@ se_write_lease() { # file owner "key=value"...
 	[ -n "$owner" ] && chown "$owner" "$file" 2>/dev/null || true
 }
 
+se_account_log() { # user -> path (empty when it cannot exist)
+	local user=${1-} home
+	[ -n "$user" ] || return 0
+	[ -z "$SE_PREFIX" ] || return 0
+	home=$(se_home_of "$user")
+	[ -n "$home" ] || return 0
+	printf '%s/.local/state/sudo-elevation/audit.log' "$home"
+}
+
+# The account's own copy of an audit line, so a user can read their own
+# grant/restore history without being root. It is the SAME line as the machine
+# log, written as that user via runuser -- the file is created by (and owned by)
+# them rather than chown'd into their home, so a failed write can never leave a
+# root-owned file in a user's state directory. Purely best effort: an audit
+# mirror must never be able to fail a grant.
+se_audit_account() { # user line
+	local user=$1 line=$2 f
+	[ "$(id -u)" = 0 ] || return 0
+	command -v runuser >/dev/null 2>&1 || return 0
+	f=$(se_account_log "$user")
+	[ -n "$f" ] || return 0
+	runuser -u "$user" -- mkdir -p "${f%/*}" >/dev/null 2>&1 || return 0
+	runuser -u "$user" -- sh -c 'printf "%s\n" "$1" >> "$2"' _ "$line" "$f" 2>/dev/null || return 0
+	runuser -u "$user" -- chmod 0600 "$f" 2>/dev/null || true
+	return 0
+}
+
+# se_audit [user] MESSAGE -- append to the machine-wide log (root 0600, mixed
+# across accounts, carries actor=) and mirror the same line into the account's
+# own log. The user argument is optional; without it only the machine log is
+# written.
 se_audit() {
-	local msg=${1-}
-	local dir
+	local user=${1-} msg=${2-} line dir
+	[ -n "$msg" ] || return 0
+	line="$(date -Is) actor=${SUDO_USER:-$(id -un)} $msg"
 	dir=$(dirname "$SE_LOG")
 	mkdir -p "$dir" 2>/dev/null || true
-	printf '%s actor=%s %s\n' "$(date -Is)" "${SUDO_USER:-$(id -un)}" "$msg" >> "$SE_LOG" 2>/dev/null || true
+	printf '%s\n' "$line" >> "$SE_LOG" 2>/dev/null || true
 	chmod 0600 "$SE_LOG" 2>/dev/null || true
+	[ -n "$user" ] && se_audit_account "$user" "$line"
+	return 0
 }
 
 se_parent_cmd() {

@@ -28,6 +28,38 @@ if [ -z "${SUDO_ASKPASS:-}" ] && [ -x "$SE_BIN_DIR/sudo-askpass" ]; then
 	export SUDO_ASKPASS="$SE_BIN_DIR/sudo-askpass"
 fi
 
+# The window currently in force. The lease file is 0600 and owned by this
+# account, so it is readable without help from sudo, and its `minutes` key is
+# exactly what grant wrote into the sudoers drop-in. The previous
+# `sudo -n grep <0440 root-owned file>` needed a cached timestamp to work at
+# all, so `status` reported an empty current_timeout whenever no lease was
+# live -- exactly when a user most wants to see the base window.
+se_current_timeout() { # lease_file
+	local m
+	m=$(se_read_kv "${1-}" minutes 2>/dev/null || true)
+	printf '%s' "${m:-$BASE_MINUTES}"
+}
+
+# Which tree this CLI came from, and which config layer won each key. Without
+# this, `sudo-elevation` on a host with both a system and a user install is
+# opaque: $PATH decides which binary answers, and nothing says so.
+se_provenance() {
+	printf 'cli=%s\n' "$SE_BIN_DIR"
+	printf 'askpass=%s\n' "${SUDO_ASKPASS:-none}"
+	local layer file
+	while IFS=$'\t' read -r layer file; do
+		[ -n "$file" ] || continue
+		[ -r "$file" ] || continue
+		printf 'config[%s]=%s\n' "$layer" "$file"
+	done < <(se_config_layers "$ME")
+	# src_* so these cannot collide with the bare keys status already prints:
+	# --porcelain output is machine-readable and duplicate keys are a bug.
+	printf 'src_base_minutes=%s\n' "$BASE_MINUTES_SRC"
+	printf 'src_max_minutes=%s\n' "$MAX_MINUTES_SRC"
+	printf 'src_gui_backend=%s\n' "$GUI_BACKEND_SRC"
+	printf 'src_dialog_timeout=%s\n' "$DIALOG_TIMEOUT_SRC"
+}
+
 usage() {
 	cat <<'EOF'
 usage: sudo-elevation <command> [options]
@@ -84,6 +116,35 @@ case "$cmd" in
 		chmod 0700 "$cache_dir" 2>/dev/null || true
 		req_file="$cache_dir/request"
 		choice_file="$cache_dir/choice"
+		# One pending request per account. Two agents racing would otherwise
+		# overwrite each other's request file, and the approval dialog would
+		# then describe a request that is not the one being answered. mkdir is
+		# the lock because it is atomic and needs no flock(1).
+		lock_dir="$cache_dir/.request.lock"
+		lock_wait=$((DIALOG_TIMEOUT > 300 ? DIALOG_TIMEOUT : 300))
+		lock_stale=$((lock_wait + 120))
+		lock_ok=0
+		if mkdir "$lock_dir" 2>/dev/null; then
+			lock_ok=1
+		else
+			# Break a stale lock: an agent killed mid-request leaves the
+			# directory behind, and a lock nobody can clear is worse than a
+			# clobbered request file. Age is taken from the lock itself so a
+			# request that is merely slow is never stolen -- and the floor
+			# keeps DIALOG_TIMEOUT=0 (no timeout) from expiring locks in 2
+			# minutes.
+			lock_age=$(( $(date +%s) - $(stat -c %Y "$lock_dir" 2>/dev/null || echo 0) ))
+			if [ "$lock_age" -gt "$lock_stale" ] \
+			   && rmdir "$lock_dir" 2>/dev/null \
+			   && mkdir "$lock_dir" 2>/dev/null; then
+				lock_ok=1
+			fi
+		fi
+		if [ "$lock_ok" != 1 ]; then
+			echo "request: 另一个 sudo-elevation request 正在等待审批（锁: $lock_dir）" >&2
+			echo "  等它完成即可；若确认没有进程在等待（>${lock_stale}s），下次会自动接管" >&2
+			exit 3
+		fi
 		{
 			printf 'requested_minutes=%s\n' "$minutes"
 			printf 'reason=%s\n' "$(se_sanitize_reason "$reason")"
@@ -92,7 +153,7 @@ case "$cmd" in
 		} > "$req_file"
 		chmod 0600 "$req_file" 2>/dev/null || true
 		rm -f "$choice_file"
-		trap 'rm -f "$req_file" "$choice_file"' EXIT
+		trap 'rm -f "$req_file" "$choice_file"; rmdir "$lock_dir" 2>/dev/null || true' EXIT
 		rc=0
 		# Force the approval dialog even when a cached timestamp would let sudo
 		# skip it, without wiping an active lease's credentials if the user cancels:
@@ -104,6 +165,19 @@ case "$cmd" in
 			sudo -k -A "$GRANT_BIN" --user "$ME" --choice-file "$choice_file" --request-file "$req_file" --config-file "$SE_CONFIG" || rc=$?
 		else
 			sudo -A "$GRANT_BIN" --user "$ME" --choice-file "$choice_file" --request-file "$req_file" --config-file "$SE_CONFIG" || rc=$?
+		fi
+		if [ "$rc" != 0 ]; then
+			# The likeliest cause is a scoped sudoers rule. This project only ever
+			# writes Defaults (the time window) and never a command rule, so it
+			# cannot widen anybody's permissions -- and it must not try. Spell the
+			# requirement out instead of letting sudo's localised message be the
+			# only clue.
+			printf 'sudo-elevation: 授权未完成（rc=%s）。\n' "$rc" >&2
+			printf '  若 sudo 报“不允许执行 / not allowed to execute”：当前账户的 sudo 被限定到少数命令。\n' >&2
+			printf '  本项目只写 Defaults（时间窗），从不写命令规则、不碰 NOPASSWD，\n' >&2
+			printf '  因此 request/grant 要求该账户已有宽权限 sudo；请改用宽权限账户，或由管理员放宽。\n' >&2
+			printf '  放宽时请保持 %s 由 root 拥有且该账户不可写（它是经 sudo 以 root 执行的）。\n' \
+				"$GRANT_BIN" >&2
 		fi
 		exit "$rc"
 		;;
@@ -167,14 +241,10 @@ case "$cmd" in
 						;;
 					esac
 				fi
-				managed="$SE_SUDOERS_DIR/90-sudo-elevation-$(se_user_slug "$ME")"
-				if [ "$(id -u)" = 0 ]; then
-					cur=$(grep -h 'timestamp_timeout' "$managed" 2>/dev/null | cut -d= -f2 || true)
-				else
-					cur=$(sudo -n grep -h 'timestamp_timeout' "$managed" 2>/dev/null | cut -d= -f2 || true)
-				fi
+				cur=$(se_current_timeout "$lease")
 				printf 'active=1\nminutes=%s\nepoch=%s\ngranted_at=%s\nrestore=%s\nreason=%s\nremaining_s=%s\nbase_minutes=%s\ncurrent_timeout=%s\n' \
 					"${minutes:-}" "${epoch:-}" "${granted:-}" "${restore:-none}" "${reason:-}" "$remaining_s" "$BASE_MINUTES" "${cur:-}"
+				se_provenance
 				exit 0
 			fi
 			printf '活动租约: %s\n' "$(se_human_minutes "${minutes:-?}")"
@@ -197,27 +267,27 @@ case "$cmd" in
 			fi
 		else
 			if [ "$porcelain" = 1 ]; then
-				managed="$SE_SUDOERS_DIR/90-sudo-elevation-$(se_user_slug "$ME")"
-				if [ "$(id -u)" = 0 ]; then
-					cur=$(grep -h 'timestamp_timeout' "$managed" 2>/dev/null | cut -d= -f2 || true)
-				else
-					cur=$(sudo -n grep -h 'timestamp_timeout' "$managed" 2>/dev/null | cut -d= -f2 || true)
-				fi
+				cur=$(se_current_timeout "$lease")
 				printf 'active=0\nminutes=\nepoch=\ngranted_at=\nrestore=\nreason=\nremaining_s=\nbase_minutes=%s\ncurrent_timeout=%s\n' \
 					"$BASE_MINUTES" "${cur:-}"
+				se_provenance
 				exit 0
 			fi
 			printf '无活动租约（基础窗口 %s）\n' "$(se_human_minutes "$BASE_MINUTES")"
 		fi
-		managed="$SE_SUDOERS_DIR/90-sudo-elevation-$(se_user_slug "$ME")"
-		if [ "$(id -u)" = 0 ]; then
-			cur=$(grep -h 'timestamp_timeout' "$managed" 2>/dev/null | cut -d= -f2 || true)
-		else
-			cur=$(sudo -n grep -h 'timestamp_timeout' "$managed" 2>/dev/null | cut -d= -f2 || true)
-		fi
+		cur=$(se_current_timeout "$lease")
 		if [ -n "$cur" ]; then
 			printf '当前 sudoers 窗口: %s\n' "$(se_human_minutes "$cur")"
 		fi
+		printf '来源: %s\n' "$SE_BIN_DIR"
+		_prov=$(se_provenance)
+		while IFS= read -r _l; do
+			case "$_l" in
+				config*) printf '  %s\n' "$_l" ;;
+			esac
+		done <<<"$_prov"
+		printf '  弹窗后端: %s\n' "$GUI_BACKEND"
+		printf '  审批上限: %s\n' "$(se_human_minutes "$MAX_MINUTES")"
 		exit 0
 		;;
 	lock)

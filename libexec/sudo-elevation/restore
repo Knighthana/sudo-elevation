@@ -49,7 +49,7 @@ if [ "$force" != 1 ]; then
 		exit 0
 	fi
 	if [ "$lease_epoch" != "$epoch" ]; then
-		se_audit "restore-skip user=$user incoming_epoch=$epoch current_epoch=$lease_epoch"
+		se_audit "$user" "restore-skip user=$user incoming_epoch=$epoch current_epoch=$lease_epoch"
 		printf 'restore: lease was replaced (epoch %s != %s), skipping\n' "$lease_epoch" "$epoch"
 		exit 0
 	fi
@@ -74,5 +74,5 @@ if [ -z "$SE_PREFIX" ] && command -v runuser >/dev/null 2>&1; then
 fi
 
 rm -f "$lease"
-se_audit "restore user=$user base=$BASE_MINUTES epoch=${epoch:-force}"
+se_audit "$user" "restore user=$user base=$BASE_MINUTES epoch=${epoch:-force}"
 printf 'sudo-elevation: 租约已结束，恢复基础窗口 %s\n' "$(se_human_minutes "$BASE_MINUTES")"

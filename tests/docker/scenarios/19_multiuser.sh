@@ -205,12 +205,104 @@ assert_contains /etc/sudo-elevation.conf "MAX_MINUTES=525600"
 rm -f "$UCFG"
 ok "install left the machine policy alone"
 
+log "status no longer needs sudo to read the current window"
+# The old implementation shelled out to `sudo -n grep <0440 root file>`, which
+# fails whenever no timestamp is cached -- i.e. exactly when there is no lease.
+"$RESTORE" --user tester --force >/dev/null 2>&1
+out=$(runuser -u tester -- /usr/local/bin/sudo-elevation status --porcelain)
+grep -qF 'active=0' <<<"$out" || die "not inactive: $out"
+grep -qF 'current_timeout=15' <<<"$out" \
+	|| die "base window not reported without a lease (sudo dependency): $out"
+ok "current_timeout reported with no lease and no sudo help"
+
+log "status shows which tree and which config layer answered"
+# Recreate the per-account layer: the block above removed it, and with no layer
+# at all there is nothing for the provenance to report.
+UCFG=/home/tester/.config/sudo-elevation/config
+mkdir -p "$(dirname "$UCFG")"
+printf 'BASE_MINUTES=5\n' >"$UCFG"
+chown tester "$UCFG"
+out=$(runuser -u tester -- /usr/local/bin/sudo-elevation status --porcelain)
+# Whichever binary answers, it self-locates through the receipt, so `cli` is the
+# resolved tree rather than the path that was typed.
+grep -qE '^cli=/(usr/local/bin|home/tester/.local/bin)$' <<<"$out" \
+	|| die "cli provenance missing: $out"
+grep -qE '^askpass=\S*sudo-askpass$' <<<"$out" || die "askpass not reported: $out"
+grep -qF "config[user]=$UCFG" <<<"$out" || die "user config layer not listed: $out"
+grep -qF "src_base_minutes=user:$UCFG" <<<"$out" || die "no per-key source: $out"
+grep -qF 'src_max_minutes=default' <<<"$out" || die "default source not reported: $out"
+# The machine file must not be listed when the resolved SE_CONFIG *is* the user
+# file: the same path is never read twice.
+grep -qF 'config[machine]=' <<<"$out" && die "machine layer duplicated the user file: $out"
+ok "provenance exposed, no duplicate layers"
+
 log "policy is tree-independent: the system CLI honours the same account layer"
 out=$(env -u XDG_CONFIG_HOME HOME=/home/tester bash -c \
 	'SUDO_ELEVATION_CONFIG=/etc/sudo-elevation.conf . /usr/local/libexec/sudo-elevation/common.sh; se_load_config tester; printf "base=%s src=%s\n" "$BASE_MINUTES" "$BASE_MINUTES_SRC"')
 grep -qF "base=5 src=user:$UCFG" <<<"$out" \
 	|| die "machine tree ignored the account layer: $out"
 ok "same effective policy from either tree"
+
+log "the human status shows the same provenance"
+human=$(runuser -u tester -- /usr/local/bin/sudo-elevation status)
+grep -qE '^来源: /(usr/local/bin|home/tester/.local/bin)$' <<<"$human" \
+	|| die "human provenance missing: $human"
+grep -qF "config[user]=$UCFG" <<<"$human" || die "human layer list missing: $human"
+grep -qF '弹窗后端: auto' <<<"$human" || die "backend not shown: $human"
+ok "provenance exposed in both output modes"
+
+log "deleting the config does not break request (defaults apply)"
+# The CLI passes --config-file unconditionally, so a hard "not found" here used
+# to make request fail outright the moment someone removed the file.
+rm -f "$UCFG"
+set_ui 15 testpass
+out=$(runuser -u tester -- /usr/local/bin/sudo-elevation request --for 15m --reason "no config file" 2>&1) \
+	|| { printf '%s\n' "$out"; die "request failed after the config was deleted"; }
+assert_contains /run/sudo-elevation/tester.lease "reason=no config file"
+assert_contains /etc/sudoers.d/90-sudo-elevation-tester "timestamp_timeout=15"
+ok "absent config falls back to defaults"
+
+log "a second concurrent request is refused, not silently merged"
+CACHE=/home/tester/.cache/sudo-elevation
+mkdir -p "$CACHE/.request.lock"
+out=$(runuser -u tester -- /usr/local/bin/sudo-elevation request --for 5m --reason "racer" 2>&1) \
+	&& die "a locked-out request went through: $out"
+grep -qF '正在等待审批' <<<"$out" || die "no lock message: $out"
+# A stale lock must be taken over rather than blocking forever.
+touch -d '1 hour ago' "$CACHE/.request.lock" 2>/dev/null \
+	|| touch -t "$(date -d '1 hour ago' +%Y%m%d%H%M 2>/dev/null || echo 202001010000)" "$CACHE/.request.lock"
+set_ui 5 testpass
+out=$(runuser -u tester -- /usr/local/bin/sudo-elevation request --for 5m --reason "stale lock" 2>&1) \
+	|| { printf '%s\n' "$out"; die "a stale lock was not reclaimed"; }
+assert_contains /run/sudo-elevation/tester.lease "reason=stale lock"
+ok "fresh lock blocks, stale lock is reclaimed"
+
+log "the lock is released again after a request finishes"
+[ ! -d "$CACHE/.request.lock" ] || {
+	ls -la "$CACHE/.request.lock" >&2
+	die "request left its lock behind"
+}
+ok "no lock leak"
+
+log "audit is two-tier: machine log for root, per-account copy for the user"
+"$GRANT" --user tester --minutes 5 --reason "audit check" >/dev/null 2>&1
+assert_contains /var/log/sudo-elevation.log "grant user=tester"
+assert_contains /var/log/sudo-elevation.log "reason=\"audit check\""
+AL=/home/tester/.local/state/sudo-elevation/audit.log
+assert_file "$AL"
+assert_contains "$AL" "grant user=tester"
+assert_contains "$AL" "reason=\"audit check\""
+# The per-account copy is created BY the account, so it is readable by them and
+# never a root-owned file dropped into their home.
+assert_eq "$(stat -c %U "$AL")" tester "account audit owner"
+assert_eq "$(stat -c %a "$AL")" 600 "account audit mode"
+runuser -u tester -- tail -n1 "$AL" >/dev/null 2>&1 || die "user cannot read their own audit log"
+# The machine log stays root-only.
+assert_eq "$(stat -c %U /var/log/sudo-elevation.log)" root "machine audit owner"
+ok "both audit tiers written, with the right owners"
+"$RESTORE" --user tester --force >/dev/null 2>&1
+assert_contains "$AL" "restore user=tester"
+ok "restore mirrored too"
 
 log "teardown: end every lease and both trees, so no restore sleeper lingers"
 runuser -u tester -- /home/tester/.local/bin/sudo-elevation lock >/dev/null 2>&1 || true

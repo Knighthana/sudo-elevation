@@ -154,6 +154,8 @@ bash -c '
 	exit 0
 ' _ "$REPO" || die "se_user_slug"
 ok "slug encoding"
+
+
 log "sudo version comparison (>= 1.8.21 for timestamp_type)"
 bash -c '
 	. "$1/libexec/sudo-elevation/common.sh" || exit 1
@@ -308,6 +310,7 @@ bash -c '
 	exit 0
 ' _ "$REPO" || die "se_assert_target_user"
 ok "cross-account boundary predicate"
+
 
 log "uninstall --dry-run touches nothing"
 touch "$SB/root/etc/sudo.conf.bak.20990101000000"
