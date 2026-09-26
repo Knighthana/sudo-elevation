@@ -775,6 +775,16 @@ se_safe_kill_restore_pid() {
 # Config/log deletion guard: SUDO_ELEVATION_CONFIG/LOG are env-redirectable.
 # Only delete files that look like ours (name + content marker); otherwise
 # preserve with a warning so a redirected purge never eats an arbitrary file.
+# Is this config file ours to delete? Two independent ways to qualify it:
+#   - by content: the installer's own header. This is the only safe test for
+#     /etc/sudo-elevation.conf, where an admin may have hand-written the file
+#     and a purge must not eat it.
+#   - by location: the per-account layer, which lives in a directory the
+#     installer creates for that account, so ownership is unambiguous. Content
+#     is not a usable test there, because the README tells users to write this
+#     file themselves -- `printf 'MAX_MINUTES=60\n' > ~/.config/.../config`
+#     replaces the file and drops the header, after which purge would refuse to
+#     clean up forever.
 se_is_own_config() {
 	local f=${1-}
 	[ -n "$f" ] || return 1
@@ -784,15 +794,22 @@ se_is_own_config() {
 		*) return 1 ;;
 	esac
 	[ ! -s "$f" ] && return 0
+	if [ -n "$(se_user_config_path "$TARGET_USER")" ] \
+		&& [ "$f" = "$(se_user_config_path "$TARGET_USER")" ]; then
+		return 0
+	fi
 	grep -q 'sudo-elevation configuration' "$f" 2>/dev/null
 }
 
+# Same idea for the audit logs: the machine log qualifies by name plus line
+# format, the per-account copy also by location (it is written into a state
+# directory the installer creates for that account).
 se_is_own_log() {
 	local f=${1-}
 	[ -n "$f" ] || return 1
 	[ -e "$f" ] || return 0
 	case "${f##*/}" in
-		sudo-elevation.log) ;;
+		sudo-elevation.log|audit.log) ;;
 		*) return 1 ;;
 	esac
 	[ ! -s "$f" ] && return 0
@@ -1172,7 +1189,7 @@ check_manifest_layout() {
 }
 
 do_uninstall() {
-	local users u arr lease mech pid home sk tmp skdir bak dest _bak _bpath _ghost _lease _ui_home _ui_conf mprefix
+	local users u arr lease mech pid home sk tmp skdir bak dest _bak _bpath _ghost _lease _ui_home _ui_conf mprefix alog
 	local others o _all _left
 	users=""
 	skdir=""
@@ -1335,6 +1352,20 @@ do_uninstall() {
 		elif [ -n "$home" ]; then
 			sk="$home/.config/opencode/skill/sudo-elevation"
 			se_safe_rm_skill "$sk"
+		fi
+
+		# The per-account audit copy, which grant/restore write alongside the
+		# machine log. It is inside that account's own state directory, so it is
+		# removed per account here rather than once for the host. Without this a
+		# user-channel purge left its own history behind forever.
+		alog=$(se_account_log "$u")
+		if [ -n "$alog" ] && [ -e "$alog" ]; then
+			if se_is_own_log "$alog"; then
+				run rm -f "$alog"
+				run rmdir "${alog%/*}" 2>/dev/null || true
+			else
+				say "warning: preserving non-sudo-elevation log: $alog" >&2
+			fi
 		fi
 	done
 	# Ghost sweep: drop-ins for users the manifest never knew. Only our own

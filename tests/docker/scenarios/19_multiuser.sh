@@ -304,6 +304,41 @@ ok "both audit tiers written, with the right owners"
 assert_contains "$AL" "restore user=tester"
 ok "restore mirrored too"
 
+log "purge takes a hand-written account config and the per-account audit log"
+# The README tells users to write the per-account config themselves
+# (`printf 'MAX_MINUTES=60\n' > ~/.config/sudo-elevation/config`), which replaces
+# the file and drops the installer's header. se_is_own_config used to go by that
+# header alone, so purge then refused forever and the file survived every uninstall.
+printf 'MAX_MINUTES=60\nGUI_BACKEND=auto\n' >/home/tester/.config/sudo-elevation/config
+chown tester /home/tester/.config/sudo-elevation/config
+grep -q 'sudo-elevation configuration' /home/tester/.config/sudo-elevation/config \
+	&& die "test setup wrong: header should be gone"
+"$GRANT" --user tester --minutes 5 --reason "purge cleanup" >/dev/null 2>&1
+assert_file /home/tester/.local/state/sudo-elevation/audit.log
+"$REPO/install.sh" --user-install --user tester --uninstall --purge >/tmp/se-purge.log 2>&1
+grep -q 'preserving non-sudo-elevation config' /tmp/se-purge.log \
+	&& die "purge still refuses the hand-written account config: $(cat /tmp/se-purge.log)"
+assert_no_file /home/tester/.config/sudo-elevation/config
+ok "hand-written account config removed (recognised by location, not header)"
+# se_audit_account writes this file; purge used to have no path to remove it at all,
+# so a user-channel purge left the account's own history behind forever.
+assert_no_file /home/tester/.local/state/sudo-elevation/audit.log
+rmdir /home/tester/.local/state/sudo-elevation 2>/dev/null || true
+assert_no_file /run/sudo-elevation/tester.lease
+ok "per-account audit log removed by purge"
+
+log "an /etc config the admin hand-wrote is still preserved (safety unchanged)"
+# The fix must not weaken the case the content check exists for: a root-owned
+# /etc file that is not recognisably ours must survive a purge.
+install_se --user tester
+printf 'hand-written by the admin, no header\n' >/etc/sudo-elevation.conf
+"$REPO/install.sh" --user tester --uninstall --purge >/tmp/se-purge2.log 2>&1
+assert_file /etc/sudo-elevation.conf
+grep -q 'preserving non-sudo-elevation config' /tmp/se-purge2.log \
+	|| die "purge did not report the foreign config: $(cat /tmp/se-purge2.log)"
+rm -f /etc/sudo-elevation.conf
+ok "foreign /etc config preserved with a warning"
+
 log "teardown: end every lease and both trees, so no restore sleeper lingers"
 runuser -u tester -- /home/tester/.local/bin/sudo-elevation lock >/dev/null 2>&1 || true
 "$REPO/install.sh" --user-install --user tester --uninstall --keep >/dev/null 2>&1 || true
