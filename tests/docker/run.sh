@@ -91,10 +91,17 @@ printf 'image build time : %ss\n' "$BUILD_TOTAL"
 printf 'wall clock       : %ss\n' "$run_seconds"
 printf -- '-- slowest scenarios (all images) --\n'
 if [ "${#SCEN_BY_NAME[@]}" -gt 0 ]; then
-	for name in "${!SCEN_BY_NAME[@]}"; do
-		printf '%s\t%s\n' "${SCEN_BY_NAME[$name]}" "$name"
-	done | sort -rn | head -n 8 | while IFS=$'\t' read -r secs name; do
-		printf '  %4ss  %s\n' "$secs" "$name"
+	# Read the whole sorted list, then slice. `sort -rn | head -n 8` looks
+	# equivalent but is not: head closes the pipe after 8 lines, so once sort's
+	# output outgrows the pipe buffer sort dies of SIGPIPE (141). Under
+	# `set -o pipefail` that fails run.sh *after* every scenario already passed.
+	mapfile -t sorted < <(
+		for name in "${!SCEN_BY_NAME[@]}"; do
+			printf '%s\t%s\n' "${SCEN_BY_NAME[$name]}" "$name"
+		done | sort -rn
+	)
+	for line in "${sorted[@]:0:8}"; do
+		printf '  %4ss  %s\n' "${line%%$'\t'*}" "${line#*$'\t'}"
 	done
 fi
 printf '===================================\n'
