@@ -23,6 +23,19 @@
   解决“同一台机器装了系统通道和用户通道时，`$PATH` 决定谁应答却毫无提示”的盲区。
 - fix: `status` 不再靠 `sudo -n grep` 读 0440 的 sudoers drop-in（无有效时间戳时必然失败，
   恰好在无租约时 `current_timeout` 为空）。改为读用户本就可读的租约文件 `minutes` 键。
+- fix: **purge 能删掉账户层配置与账户级审计日志**。两处都是真机端到端测出来的：
+  (1) `se_is_own_config` 只认内容标记 `sudo-elevation configuration`，而 README 恰恰教
+  用户用 `printf 'MAX_MINUTES=60\n' > ~/.config/sudo-elevation/config` 手写账户层配置——
+  整file覆写丢掉标记，于是 purge 从此**永远拒删**，文档与清理逻辑自相矛盾。现在账户层
+  改按**位置**判定（它就在安装器为该账户创建的目录里，归属无歧义），`/etc/sudo-elevation.conf`
+  仍按**内容**判定，管理员手写的系统配置绝不被误删；该安全边界有反向断言守着。
+  (2) `se_audit_account` 写出 `~/.local/state/sudo-elevation/audit.log`，但 `do_uninstall`
+  只处理机器日志，于是用户通道 purge 把账户自己的历史永久留下。现在按账户在 Phase 3 清理。
+  回归覆盖加在 `19_multiuser`。
+- tests: **用户通道完整链路真机通过**（2026-09-26，Linux Mint 22.3 / sudo 1.9.15p5 /
+  zenity 3.44.2 / X11）：`tests/manual/user-install-e2e.sh` 从安装、账户层生效、CLI 自带
+  `SUDO_ASKPASS`、真弹窗、真认证、租约、双级审计、`lock` 回基窗，直到 purge 清到干净。
+  跑之前先 `check` 确认干净状态，`--yes run` 全程约 1 分钟。不进 CI（需 root 且依赖真实 GUI）。
 - feat: `request` 加每账户互斥锁（`~/.cache/sudo-elevation/.request.lock`，基于 `mkdir`）。
   过去两个 agent 并发请求会互相覆盖 request 文件，弹窗描述的可能不是正在回答的那个请求。
   陈旧锁（> 弹窗超时 +120s，下限 300s+120s）自动接管，`DIALOG_TIMEOUT=0` 不会误抢。

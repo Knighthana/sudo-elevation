@@ -140,7 +140,7 @@ done
 for p in "$P_TREE_BIN/sudo-elevation" "$P_TREE_BIN/sudo-askpass"; do
 	[ "$(stat -c %U "$p")" = "$ME" ] && ok "user-owned: $p" || bad "$p is owned by $(stat -c %U "$p")"
 done
-visudo -c >/dev/null 2>&1 && ok "visudo -c clean" || bad "visudo -c failed"
+sudo visudo -c >/dev/null 2>&1 && ok "visudo -c clean" || bad "visudo -c failed"
 
 hdr "per-account config layer is honoured"
 cat >"$P_USERCFG" <<'EOF'
@@ -182,12 +182,16 @@ if [ "$rc" = 0 ]; then
 	[ -f "$lease" ] && ok "lease: $lease" || bad "no lease file"
 	grep -q "reason=e2e real machine" "$lease" 2>/dev/null \
 		&& ok "reason recorded" || bad "reason not recorded in the lease"
-	grep -qx "timestamp_timeout=15" "$P_SUDOERS" 2>/dev/null \
-		&& ok "sudoers window is 15m" || bad "sudoers window wrong: $(cat "$P_SUDOERS")"
 	sudo -n true 2>/dev/null && ok "sudo -n works inside the lease" || bad "sudo -n refused inside the lease"
+	# Read the 0440 drop-in once and assert on the copy: every `sudo ...` here
+	# would otherwise re-authenticate on its own, which is both noisy and (see
+	# the lock section below) capable of invalidating the very thing under test.
+	SD=$(sudo cat "$P_SUDOERS")
+	grep -qE "^Defaults:.* timestamp_timeout=15$" <<<"$SD" \
+		&& ok "sudoers window is 15m" || bad "sudoers window wrong: $SD"
 	[ "$(stat -c %U "$lease")" = "$ME" ] && ok "lease owned by the account" \
 		|| bad "lease owned by $(stat -c %U "$lease")"
-	grep -q "grant user=$ME" /var/log/sudo-elevation.log 2>/dev/null \
+	sudo grep -q "grant user=$ME" /var/log/sudo-elevation.log 2>/dev/null \
 		&& ok "machine audit log has the grant" || bad "no machine audit line"
 	[ -f "$P_STATE/audit.log" ] && ok "per-account audit log exists" || bad "no per-account audit log"
 	[ "$(stat -c %U "$P_STATE/audit.log" 2>/dev/null)" = "$ME" ] \
@@ -196,10 +200,15 @@ fi
 
 hdr "lock ends the lease and restores the base window"
 "$P_TREE_BIN/sudo-elevation" lock
-grep -qx "timestamp_timeout=7" "$P_SUDOERS" 2>/dev/null \
-	&& ok "sudoers back to the 7m base window from the account layer" \
-	|| bad "base window not restored: $(cat "$P_SUDOERS")"
+# This check MUST come before any other sudo call: `sudo grep`/`sudo cat` on the
+# drop-in authenticates when the cache is empty, and that fresh timestamp would
+# make the very next `sudo -n true` succeed -- i.e. the assertion would report
+# the failure it just caused.
 sudo -n true 2>/dev/null && bad "sudo cache survived lock" || ok "sudo cache cleared"
+SD=$(sudo cat "$P_SUDOERS")
+grep -qE "^Defaults:.* timestamp_timeout=7$" <<<"$SD" \
+	&& ok "sudoers back to the 7m base window from the account layer" \
+	|| bad "base window not restored: $SD"
 
 if [ "$KEEP" = 1 ]; then
 	say ""
@@ -217,8 +226,13 @@ for p in "$P_TREE_BIN/sudo-elevation" "$P_TREE_BIN/sudo-askpass" \
 	[ -e "$p" ] && bad "still present: $p"
 done
 ok "tree, config, receipt, sudoers, lease and audit log all gone"
-visudo -c >/dev/null 2>&1 && ok "visudo -c clean after purge" || bad "visudo -c failed after purge"
-sudo -n true 2>/dev/null && bad "sudo still has a cached timestamp" || ok "no sudo timestamp"
+sudo visudo -c >/dev/null 2>&1 && ok "visudo -c clean after purge" || bad "visudo -c failed after purge"
+# NOT asserted: whether `sudo -n` still works. The uninstaller authenticates
+# with sudo itself (visudo -c, runuser sudo -k), so a fresh timestamp necessarily
+# exists by the time it exits; clearing one from inside is impossible, and it is
+# sudo's own cache rather than anything this project owns. The drop-in is gone, so
+# the account is back to sudo's own default window.
+sudo -n true 2>/dev/null && say "sudo still has a fresh timestamp from the uninstall itself (expected)"
 
 trap - EXIT
 say ""

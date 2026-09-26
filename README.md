@@ -207,8 +207,15 @@ shellcheck + host 沙箱 + Docker 矩阵。
   `tests/manual/askpass-env.sh`（`--yes run` 输一次口令，不落地）可复现。
   助手属主那条另有 `19_multiuser` 在 sudo 1.9.15p5 / 1.9.13p3 上的容器内覆盖。
   两者都是 **sudo 自身行为、与 WSLg 无关**。
-  尚未合并跑过的一步只有「用户通道安装 → CLI → 真 askpass → 真 zenity 弹窗」这
-  一条完整链路（各环节已分别验证），需要 root 装一次再 purge，故未纳入常规手测。
+- ✅ **用户通道完整链路已通过**（2026-09-26，Linux Mint 22.3 / sudo 1.9.15p5 /
+  zenity 3.44.2 / X11）：`--user-install` 安装 → 账户层配置（7m 基窗）生效 →
+  CLI 自行提供 `SUDO_ASKPASS` → 真 zenity 选时长窗 → 真口令认证 → 15 分钟租约 →
+  `sudo -n` 可用 → 机器级与账户级审计双写 → `lock` 清缓存并回到 7m 基窗 →
+  `--uninstall --purge` 清到干净（`visudo -c` 通过）。
+  用 `tests/manual/user-install-e2e.sh check`（只读预检）/`--yes run`（全程约 1 分钟，
+  会弹窗、输几次口令）可复现。**不进 CI**：它要 root 装一次再 purge，且依赖真实 GUI。
+  这一轮同时暴露并修掉了两个真实缺陷：账户层配置被 README 教用户手写后 purge
+  永久拒删、账户级审计日志没有清理路径（回归覆盖在 `19_multiuser`）。
 - ⏳ `lock` tty 回退真机半自动：`tests/manual/lock-tty.sh check` 只读预检；
   空闲时 `--yes timeout-only`（全自动约 40s）或有 tty `--yes all`（输 1 次口令约 1min）。不进 CI。
 
