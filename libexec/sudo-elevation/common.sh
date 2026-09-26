@@ -380,8 +380,9 @@ se_version_ge() {
 # the output alphabet, so escaping exactly those makes the mapping unique.
 # Ordinary names are unchanged (`tester` still yields `tester`).
 se_user_slug() {
-	local s out= c
+	local s out c
 	s=${1-}
+	out=""
 	while [ -n "$s" ]; do
 		c=${s:0:1}
 		s=${s:1}

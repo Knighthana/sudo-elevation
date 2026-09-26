@@ -285,11 +285,20 @@ bash -c '
 		chmod "$m" "$2/trust.conf"
 		if se_config_trusted "$2/trust.conf" "$me"; then echo "mode $m wrongly trusted" >&2; exit 1; fi
 	done
+	# The next three assertions are about OWNERSHIP, and the CI runner executes
+	# this suite as root -- where the file we just created is root-owned, which
+	# is precisely the case they must not hit. Hand it to a non-root account so
+	# "root or the target user, nobody else" is actually exercised either way.
 	chmod 0644 "$2/trust.conf"
-	# Owner must be root or the target user, nobody else.
+	owner=$me
+	if [ "$(id -u)" = 0 ]; then
+		owner=nobody
+		chown nobody "$2/trust.conf" || exit 1
+	fi
 	se_config_trusted "$2/trust.conf" root && { echo "non-root file trusted as root-owned" >&2; exit 1; }
 	se_config_trusted "$2/trust.conf" "" && { echo "non-root file trusted with no user" >&2; exit 1; }
 	se_config_trusted "$2/trust.conf" "somebody-else" && { echo "third-party file trusted" >&2; exit 1; }
+	se_config_trusted "$2/trust.conf" "$owner" || { echo "owner own file not trusted" >&2; exit 1; }
 	se_config_trusted "$2/nope.conf" "$me" && { echo "missing file trusted" >&2; exit 1; }
 	rm -f "$2/trust.conf"
 	exit 0
