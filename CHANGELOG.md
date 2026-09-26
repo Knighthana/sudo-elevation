@@ -27,6 +27,13 @@
 - fix: 交互发现每棵树透传 `--user/--skill-dir`，回放命令可粘贴；`--keep/--purge` 互斥报错；
   缺值 flags 友好报错；`manifest`/`receipt` 补记 `SUDO_CONF/SUDOERS_DIR/RUNTIME_DIR/LOG`（漂移仅告警）；
   家目录属主链安装即修正（root 代建不再毒化后续 user 安装）；`run.sh` 超时后要求 `SCENARIO-DONE rc=0`。
+- ci: `actions/checkout` 升 v5（消 Node 20 弃用告警；该运行时属于 action 自身，本项目仍是纯 shell）；
+  Host/Docker 步骤各自上报墙钟耗时（`::notice::`）与场景通过数，便于按真实数据评估 cold build。
+  **经实测后明确不做**的 CI 优化（防后人重复走弯路）：CI 时长约 76% 来自测试等待租约到期
+  （`12/03/13` 三场景的租约本体约 66s 属物理时间、不可压缩），sleep→条件轮询实测仅省 10-16s（<7%）
+  却让慢机更易 flaky；容器往返 0.24s/次、warm build 0s，Docker 缓存/并行无 IO 收益（并行是更快而非更省）；
+  `CYCLES` 不下调以免牺牲覆盖。`ubuntu-latest` 保持浮动，便于上游迁移（如 Ubuntu 26）时早暴露漂移——
+  这是**验证策略**而非产品支持矩阵，产品只校验 `sudo >= 1.8.21`、与发行版无关。
 
 ## 0.1.6 - 2026-09-24
 
