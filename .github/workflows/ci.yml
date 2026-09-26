@@ -6,6 +6,22 @@ on:
     tags: ['v*']
   pull_request:
 
+# Pin the job token instead of inheriting the repository/org default, which an
+# owner can widen at any time. The run log showed the default in effect as
+# `Contents: read, Metadata: read, Packages: read`; this workflow only ever
+# reads the tree, and the untrusted input is the PR's own code, so `packages:
+# read` is dropped rather than carried along implicitly.
+permissions:
+  contents: read
+
+# Superseded PR runs are cancelled — nobody is waiting on them and a full matrix
+# is ~5 minutes. Pushes to master and tags are NOT cancelled: every push there
+# is a deliberate act, minutes are free on a public repo, and cancelling would
+# hide whether an earlier commit was already broken.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -18,6 +34,12 @@ jobs:
     steps:
       # v5 runs on Node 24; v4 emitted a Node 20 deprecation warning. This is
       # the action's own runtime — the project itself is pure shell.
+      # v7 is the current major (checked 2026-09-26) and would work equally
+      # well, but it is not adopted here on purpose: the local CI harness
+      # emulates checkout with a plain `git clone`, so no major bump can be
+      # verified before it reaches GitHub. v5 is the smallest change that
+      # removes the warning; revisit when the harness can exercise the action
+      # itself, or when v5 hits its own Node deprecation.
       - uses: actions/checkout@v5
 
       - name: Install shellcheck
