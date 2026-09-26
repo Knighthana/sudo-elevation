@@ -269,6 +269,7 @@ EOF
 		while [ $# -gt 0 ]; do
 			case "$1" in
 				--purge) fwd+=(--purge); explicit=1; purge_seen=1; shift ;;
+				--all-users) fwd+=(--all-users); explicit=1; shift ;;
 				--keep) fwd+=(--keep); explicit=1; keep_seen=1; shift ;;
 				--user-install) fwd+=(--user-install); explicit=1; explicit_ui=1; shift ;;
 				--no-system) fwd+=(--no-system); explicit=1; shift ;;

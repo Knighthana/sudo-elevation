@@ -88,6 +88,9 @@ if [ "${#reason_raw}" -gt 200 ] || case "$reason_raw" in *$'\n'*|*$'\r'*|*$'\t'*
 fi
 
 dest="$SE_SUDOERS_DIR/90-sudo-elevation-$(se_user_slug "$user")"
+lease_dest=$(se_lease_file "$user")
+legacy_dest="$SE_SUDOERS_DIR/90-sudo-elevation-$(se_legacy_user_slug "$user")"
+legacy_lease="$SE_RUNTIME_DIR/$(se_legacy_user_slug "$user").lease"
 tmp=$(mktemp "${TMPDIR:-/tmp}/sudo-elevation-sudoers.XXXXXX")
 trap 'rm -f "$tmp"' EXIT
 se_render_sudoers "$user" "$minutes" "$tmp"
@@ -95,6 +98,8 @@ if ! se_install_sudoers "$tmp" "$dest"; then
 	echo "grant: failed to validate/install $dest" >&2
 	exit 4
 fi
+# A file under the old, non-injective name is now stale (see se_user_slug).
+se_reap_legacy "$legacy_dest" "$dest" 'Managed by sudo-elevation'
 
 now=$(date +%s)
 # Unique lease id: second-resolution time is not enough because two leases can
@@ -113,6 +118,7 @@ se_write_lease "$(se_lease_file "$user")" "$user" \
 	"reason=$reason" \
 	"granted_at=$(date -Is)" \
 	"restore=$restore_mech"
+se_reap_legacy "$legacy_lease" "$lease_dest" '^epoch='
 
 se_audit "grant user=$user minutes=$minutes requested=$requested restore=$restore_mech reason=\"$reason\""
 

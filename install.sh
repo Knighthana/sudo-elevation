@@ -59,6 +59,7 @@ TEST_HOOKS=0
 SKILL_DIR=""
 ACTION=install
 PURGE=0
+ALL_USERS=0
 USER_INSTALL=0
 NO_SYSTEM=0
 SE_NEW_BAK=""
@@ -137,6 +138,11 @@ options:
                         --user-install/--no-system/--prefix/--user/--skill-dir
                         it runs automatic (script-safe) instead
   --keep                with --uninstall: explicit keep (automatic, no prompts)
+  --all-users           with --uninstall: act on every account recorded in the
+                        manifest, not just --user. Uninstall touches ONLY the
+                        target account by default, and keeps the shared system
+                        payload/sudo.conf/config while other accounts remain --
+                        one account's uninstall must never break another.
   --purge               with --uninstall: remove config and our own data too;
                         foreign/admin files sharing names are preserved
                         (backups by strict shape, sudoers by marker header,
@@ -161,6 +167,7 @@ while [ $# -gt 0 ]; do
 		--force|-f) FORCE=1; shift ;;
 		--uninstall) ACTION=uninstall; shift ;;
 		--purge) PURGE=1; EXPLICIT=1; shift ;;
+		--all-users) ALL_USERS=1; EXPLICIT=1; shift ;;
 		--keep) KEEP=1; EXPLICIT=1; shift ;;
 		--version) printf '%s\n' "$VERSION"; exit 0 ;;
 		--help|-h) usage; exit 0 ;;
@@ -356,7 +363,6 @@ write_config() {
 	rm -f "$tmp"
 }
 
-
 # True when our marker block in $SE_SUDO_CONF points `Path askpass` into the
 # target user's own home. That is the hijack: a machine-global directive
 # handing `sudo -A` for every account on the box to one user. A block pointing
@@ -473,6 +479,23 @@ print_system_snippet() {
 	say "       # >>> sudo-elevation >>>"
 	say "       Path askpass $SE_BIN_DIR/sudo-askpass"
 	say "       # <<< sudo-elevation <<<"
+}
+
+# Record the accounts that still use this install. Without this, a removed
+# account keeps its name in USERS forever and every later uninstall believes
+# somebody else still needs the shared payload, so a host could never be fully
+# cleaned. -v passes the value as data, never as awk code.
+manifest_set_users() { # csv
+	local csv=$1 f="$SE_SHARE/manifest" tmp
+	[ -f "$f" ] || return 0
+	[ "$DRY" = 1 ] && return 0
+	tmp=$(mktemp)
+	awk -v v="$csv" '
+		/^USERS=/ && !seen { print "USERS=" v; seen = 1; next }
+		{ print }
+	' "$f" > "$tmp"
+	se_install_file "$tmp" "$f" 0644
+	rm -f "$tmp"
 }
 
 manifest_users() {
@@ -1150,6 +1173,7 @@ check_manifest_layout() {
 
 do_uninstall() {
 	local users u arr lease mech pid home sk tmp skdir bak dest _bak _bpath _ghost _lease _ui_home _ui_conf mprefix
+	local others o _all _left
 	users=""
 	skdir=""
 	bak=""
@@ -1173,7 +1197,30 @@ do_uninstall() {
 	fi
 	[ -n "$SKILL_DIR" ] && skdir=$SKILL_DIR
 	[ -n "$users" ] || users=$TARGET_USER
-	IFS=',' read -r -a arr <<< "$users,$TARGET_USER"
+	# Which accounts this run acts on. Default: ONLY the target. The old code
+	# walked every account the manifest happened to list, so on a shared host
+	# one user's `uninstall --purge` ended every other user's lease, reset
+	# their sudoers and deleted their skill. --all-users is the explicit
+	# "this host is being decommissioned" opt-in.
+	others=""
+	if [ "$ALL_USERS" = 1 ]; then
+		IFS=',' read -r -a arr <<< "$users,$TARGET_USER"
+	else
+		arr=("$TARGET_USER")
+		IFS=',' read -r -a _all <<< "$users"
+		for o in "${_all[@]}"; do
+			[ -n "$o" ] || continue
+			[ "$o" = "$TARGET_USER" ] && continue
+			others="$others $o"
+		done
+	fi
+	# The system tree's payload, sudo.conf marker and /etc config are shared by
+	# every account, so they may only go when the last account leaves. A user
+	# install shares nothing, so the guard does not apply there.
+	KEEP_MACHINE=0
+	if [ "$others" ] && [ "$USER_INSTALL" = 0 ]; then
+		KEEP_MACHINE=1
+	fi
 	# --no-system never touches /etc or /run (unprivileged): user payload
 	# only, plus a manual snippet for the admin at the end.
 	SYS_OK=1
@@ -1228,19 +1275,34 @@ do_uninstall() {
 		fi
 	done
 
-	# Phase 2 (both modes): remove software payload.
-	run rm -f "$SE_BIN_DIR/sudo-askpass" "$SE_BIN_DIR/sudo-elevation"
-	run rm -f "$SE_LIBEXEC/common.sh" "$SE_LIBEXEC/grant" "$SE_LIBEXEC/restore" "$SE_LIBEXEC/install.sh"
-	run rmdir "$SE_LIBEXEC" 2>/dev/null || true
-	run rm -f "$SE_SHARE/VERSION" "$SE_SHARE/LICENSE"
-	if [ "$PURGE" = 1 ]; then
-		run rm -f "$SE_SHARE/manifest"
-	fi
-	run rmdir "$SE_SHARE" 2>/dev/null || true
-	if [ "$PURGE" = 1 ]; then
-		# Tidy parents created for user installs (only empty dirs go).
-		run rmdir "$(dirname "$SE_LIBEXEC")" 2>/dev/null || true
-		run rmdir "$(dirname "$SE_SHARE")" 2>/dev/null || true
+	# Phase 2 (both modes): remove software payload. Shared by every account on
+	# this host, so it stays until the last one is gone -- otherwise the other
+	# users lose `sudo -A` and `sudo-elevation` entirely.
+	if [ "$KEEP_MACHINE" = 1 ]; then
+		say "keeping the shared payload: still in use by$others"
+		say "  re-run with --all-users once they are gone, or uninstall per account"
+		_left=""
+		for o in "${_all[@]}"; do
+			[ -n "$o" ] || continue
+			[ "$o" = "$TARGET_USER" ] && continue
+			[ -n "$_left" ] && _left="$_left,"
+			_left="$_left$o"
+		done
+		manifest_set_users "$_left"
+	else
+		run rm -f "$SE_BIN_DIR/sudo-askpass" "$SE_BIN_DIR/sudo-elevation"
+		run rm -f "$SE_LIBEXEC/common.sh" "$SE_LIBEXEC/grant" "$SE_LIBEXEC/restore" "$SE_LIBEXEC/install.sh"
+		run rmdir "$SE_LIBEXEC" 2>/dev/null || true
+		run rm -f "$SE_SHARE/VERSION" "$SE_SHARE/LICENSE"
+		if [ "$PURGE" = 1 ]; then
+			run rm -f "$SE_SHARE/manifest"
+		fi
+		run rmdir "$SE_SHARE" 2>/dev/null || true
+		if [ "$PURGE" = 1 ]; then
+			# Tidy parents created for user installs (only empty dirs go).
+			run rmdir "$(dirname "$SE_LIBEXEC")" 2>/dev/null || true
+			run rmdir "$(dirname "$SE_SHARE")" 2>/dev/null || true
+		fi
 	fi
 
 	if [ "$PURGE" != 1 ]; then
@@ -1277,8 +1339,9 @@ do_uninstall() {
 	done
 	# Ghost sweep: drop-ins for users the manifest never knew. Only our own
 	# rendered files (marker header) go; an admin hand-made file sharing the
-	# prefix is preserved with a warning.
-	if [ "$SYS_OK" = 1 ]; then
+	# prefix is preserved with a warning. Skipped while other accounts still
+	# use this install: an unknown drop-in may well be one of theirs.
+	if [ "$SYS_OK" = 1 ] && [ "$KEEP_MACHINE" = 0 ]; then
 		for _ghost in "$SE_SUDOERS_DIR"/90-sudo-elevation-*; do
 			[ -e "$_ghost" ] || continue
 			if se_is_own_sudoers "$_ghost"; then
@@ -1289,8 +1352,10 @@ do_uninstall() {
 		done
 	fi
 	# Ghost sweep: leases (kill tracked sleepers first). Foreign *.lease files
-	# without our keys (e.g. in a redirected RUNTIME_DIR) are preserved.
-	if [ "$SYS_OK" = 1 ]; then
+	# without our keys (e.g. in a redirected RUNTIME_DIR) are preserved. Also
+	# skipped while other accounts remain: an unrecognised lease is not
+	# evidence that nobody is using it.
+	if [ "$SYS_OK" = 1 ] && [ "$KEEP_MACHINE" = 0 ]; then
 		for _lease in "$SE_RUNTIME_DIR"/*.lease; do
 			[ -f "$_lease" ] || continue
 			if ! se_is_own_lease "$_lease"; then
@@ -1305,7 +1370,10 @@ do_uninstall() {
 		done
 	fi
 
-	if [ "$SYS_OK" = 1 ] && [ -f "$SE_SUDO_CONF" ] && grep -q '^# >>> sudo-elevation >>>' "$SE_SUDO_CONF"; then
+	# The marker block is machine-global: while other accounts still rely on
+	# this install, dropping it would break `sudo -A` for the whole host.
+	if [ "$SYS_OK" = 1 ] && [ "$KEEP_MACHINE" = 0 ] \
+	   && [ -f "$SE_SUDO_CONF" ] && grep -q '^# >>> sudo-elevation >>>' "$SE_SUDO_CONF"; then
 		if [ "$DRY" = 1 ]; then
 			say "[dry-run] remove marker block from $SE_SUDO_CONF"
 		else
@@ -1317,7 +1385,10 @@ do_uninstall() {
 		fi
 	fi
 
-	if se_is_own_config "$SE_CONFIG"; then
+	# The system config is machine-wide policy; the per-account layer is not.
+	if [ "$KEEP_MACHINE" = 1 ]; then
+		say "keeping machine config: $SE_CONFIG"
+	elif se_is_own_config "$SE_CONFIG"; then
 		run rm -f "$SE_CONFIG"
 	else
 		say "warning: preserving non-sudo-elevation config: $SE_CONFIG" >&2
@@ -1328,7 +1399,7 @@ do_uninstall() {
 	if [ "$SYS_OK" != 1 ]; then
 		say "[no-system] skip sudo.conf backups (admin snippet below)"
 	fi
-	if [ "$SYS_OK" = 1 ] && [ -n "$bak" ]; then
+	if [ "$SYS_OK" = 1 ] && [ "$KEEP_MACHINE" = 0 ] && [ -n "$bak" ]; then
 		case "$bak" in
 			*/*) say "warning: odd recorded backup name, skipping: $bak" >&2 ;;
 			*)
@@ -1341,7 +1412,7 @@ do_uninstall() {
 				;;
 		esac
 	fi
-	if [ "$SYS_OK" = 1 ]; then
+	if [ "$SYS_OK" = 1 ] && [ "$KEEP_MACHINE" = 0 ]; then
 		for _bak in "$SE_SUDO_CONF".bak.*; do
 			[ -e "$_bak" ] || continue
 			se_own_backup "$_bak" || continue
@@ -1361,7 +1432,7 @@ do_uninstall() {
 			run rmdir "$_ui_conf/sudo-elevation" 2>/dev/null || true
 		fi
 	fi
-	if [ "$SYS_OK" = 1 ]; then
+	if [ "$SYS_OK" = 1 ] && [ "$KEEP_MACHINE" = 0 ]; then
 		run rmdir "$SE_RUNTIME_DIR" 2>/dev/null || true
 		if se_is_own_log "$SE_LOG"; then
 			run rm -f "$SE_LOG"

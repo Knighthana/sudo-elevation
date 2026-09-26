@@ -128,6 +128,32 @@ EOF
 "$REPO/install.sh" --prefix "$SB/root" --user "$ME" --skill-dir "$SB/skill" >/dev/null
 ok "out-of-range and inverted configs rejected"
 
+log "se_user_slug is injective (a.b and a_b must not share a file)"
+bash -c '
+	. "$1/libexec/sudo-elevation/common.sh" || exit 1
+	# Ordinary names (no dot, no underscore) must be untouched, or every
+	# existing drop-in/lease would be orphaned on upgrade. A name containing
+	# either is deliberately renamed -- that is the collision being fixed.
+	for u in tester alice root A-1 svcaccount9; do
+		[ "$(se_user_slug "$u")" = "$u" ] || { echo "$u was renamed" >&2; exit 1; }
+	done
+	# The two names the old tr -c mapping collapsed onto one file.
+	[ "$(se_user_slug "a.b")" != "$(se_user_slug "a_b")" ] || exit 1
+	[ "$(se_legacy_user_slug "a.b")" = "$(se_legacy_user_slug "a_b")" ] \
+		|| { echo "legacy mapping is expected to collide" >&2; exit 1; }
+	seen=""
+	for u in alice bob a.b a_b a-b a.b.c A.B a_b_c a..b a__2e__b a__5f__b; do
+		s=$(se_user_slug "$u")
+		case " $seen " in
+			*" $s "*) echo "collision: $u -> $s" >&2; exit 1 ;;
+		esac
+		seen="$seen $s"
+	done
+	# No output may be usable as a path fragment.
+	case "$(se_user_slug "a.b")" in */*|.|..) echo "slug is not path-safe" >&2; exit 1 ;; esac
+	exit 0
+' _ "$REPO" || die "se_user_slug"
+ok "slug encoding"
 log "sudo version comparison (>= 1.8.21 for timestamp_type)"
 bash -c '
 	. "$1/libexec/sudo-elevation/common.sh" || exit 1

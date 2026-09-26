@@ -63,6 +63,9 @@ if ! se_install_sudoers "$tmp" "$dest"; then
 	echo "restore: failed to validate/install $dest" >&2
 	exit 4
 fi
+# A file under the old, non-injective name is now stale (see se_user_slug).
+se_reap_legacy "$SE_SUDOERS_DIR/90-sudo-elevation-$(se_legacy_user_slug "$user")" "$dest" \
+	'Managed by sudo-elevation'
 
 # A lease overrides the base window: clear the cached timestamp so a short
 # lease cannot leave access for the remainder of the base window.

@@ -372,9 +372,48 @@ se_version_ge() {
 	}'
 }
 
-# Filename slug for per-user sudoers/lease files. Dots are intentionally
-# mapped to '_' too (e.g. first.last -> first_last) so names stay portable.
-se_user_slug() { printf '%s' "$1" | tr -c 'A-Za-z0-9_-' '_'; }
+# Filename-safe and INJECTIVE encoding of an account name. The previous
+# `tr -c 'A-Za-z0-9_-' _` was not injective: it mapped both `a.b` and `a_b` to
+# `a_b`, so two distinct accounts shared one sudoers drop-in and one lease file
+# -- either could end the other's window, read the other's reason, and silently
+# overwrite their timeout. `.` and `_` are the only characters that collide with
+# the output alphabet, so escaping exactly those makes the mapping unique.
+# Ordinary names are unchanged (`tester` still yields `tester`).
+se_user_slug() {
+	local s out= c
+	s=${1-}
+	while [ -n "$s" ]; do
+		c=${s:0:1}
+		s=${s:1}
+		case "$c" in
+			[A-Za-z0-9-]) out=$out$c ;;
+			.) out="${out}__2e__" ;;
+			_) out="${out}__5f__" ;;
+			# se_valid_user rejects anything else; escape defensively anyway
+			# so this can never emit a path separator or shell-active byte.
+			*) out="${out}__${c}__" ;;
+		esac
+	done
+	printf '%s' "$out"
+}
+
+# The pre-injective mapping, kept ONLY to find files an older install left
+# behind. Never use it to build a new path.
+se_legacy_user_slug() { printf '%s' "$1" | tr -c 'A-Za-z0-9_-' '_'; }
+
+# One-time cleanup after the encoding change. A file named by the old mapping may
+# be a leftover, or -- if two accounts really did collide -- the shared file they
+# were fighting over. Either way the correctly-named file is now authoritative,
+# so removing the stale path is strictly an improvement. Requires a recognisable
+# marker so a foreign file that happens to sit there is never touched.
+se_reap_legacy() { # legacy_path new_path marker
+	[ -e "$1" ] || return 0
+	[ -e "$2" ] || return 0
+	[ "$1" != "$2" ] || return 0
+	grep -q "$3" "$1" 2>/dev/null || return 0
+	rm -f "$1" 2>/dev/null || true
+	return 0
+}
 
 se_home_of() { getent passwd "$1" 2>/dev/null | cut -d: -f6; }
 
