@@ -70,6 +70,64 @@ if grep -q 'SUDO_ELEVATION_FAKE_PASSWORD' "$SB/root/usr/local/bin/sudo-askpass";
 fi
 ok "hook stripping works"
 
+log "config precedence: flag > existing config > default, and reinstall is idempotent"
+CONF="$SB/root/etc/sudo-elevation.conf"
+# A hand-edited machine layer, exactly what the README tells users to do.
+cat >"$CONF" <<'EOF'
+BASE_MINUTES=25
+MAX_MINUTES=1440
+GUI_BACKEND=wayland
+EOF
+"$REPO/install.sh" --prefix "$SB/root" --user "$ME" --skill-dir "$SB/skill" >/dev/null
+grep -qx 'BASE_MINUTES=25' "$CONF" || die "reinstall reset BASE_MINUTES: $(cat "$CONF")"
+grep -qx 'MAX_MINUTES=1440' "$CONF" || die "reinstall reset MAX_MINUTES: $(cat "$CONF")"
+grep -qx 'GUI_BACKEND=wayland' "$CONF" || die "reinstall reset GUI_BACKEND: $(cat "$CONF")"
+# The window must reach sudoers too, not just the config file.
+grep -q 'timestamp_timeout=25' "$SB/root/etc/sudoers.d/90-sudo-elevation-$ME" \
+	|| die "sudoers disagrees with the preserved config"
+# Keys the config never mentioned still materialise, so the file stays complete.
+grep -qx 'DIALOG_TIMEOUT=300' "$CONF" || die "absent key not materialised: $(cat "$CONF")"
+ok "reinstall preserves a hand-edited config and propagates it to sudoers"
+
+log "an explicit flag overrides the config"
+"$REPO/install.sh" --prefix "$SB/root" --user "$ME" --skill-dir "$SB/skill" --base-timeout 30m >/dev/null
+grep -qx 'BASE_MINUTES=30' "$CONF" || die "--base-timeout did not win: $(cat "$CONF")"
+grep -q 'timestamp_timeout=30' "$SB/root/etc/sudoers.d/90-sudo-elevation-$ME" \
+	|| die "flag did not reach sudoers"
+# The keys the flag did not cover keep the config's values.
+grep -qx 'MAX_MINUTES=1440' "$CONF" || die "unrelated key lost: $(cat "$CONF")"
+grep -qx 'GUI_BACKEND=wayland' "$CONF" || die "unrelated key lost: $(cat "$CONF")"
+ok "flag wins over config, untouched keys survive"
+
+log "reinstall right after a flag install is idempotent"
+"$REPO/install.sh" --prefix "$SB/root" --user "$ME" --skill-dir "$SB/skill" >/dev/null
+grep -qx 'BASE_MINUTES=30' "$CONF" || die "second reinstall reset the flag value: $(cat "$CONF")"
+ok "idempotent"
+
+log "a config that violates the flags' own bounds is rejected, not installed"
+# Non-numeric values are ignored by the parser (documented fail-safe), so the
+# effective value silently falls back to the default. Numeric but nonsensical
+# ones must stop the install instead.
+printf 'MAX_MINUTES=99999999\n' >"$CONF"
+if "$REPO/install.sh" --prefix "$SB/root" --user "$ME" --skill-dir "$SB/skill" >"$SB/badcfg.log" 2>&1; then
+	die "installer accepted MAX_MINUTES=99999999"
+fi
+grep -q 'out of range' "$SB/badcfg.log" || die "no range complaint: $(cat "$SB/badcfg.log")"
+printf 'BASE_MINUTES=100\nMAX_MINUTES=50\n' >"$CONF"
+if "$REPO/install.sh" --prefix "$SB/root" --user "$ME" --skill-dir "$SB/skill" >"$SB/badcfg.log" 2>&1; then
+	die "installer accepted BASE > MAX"
+fi
+grep -q 'BASE must be <= MAX' "$SB/badcfg.log" || die "no ordering complaint: $(cat "$SB/badcfg.log")"
+# A rejected install must not have left a half-applied config behind.
+grep -q 'MAX_MINUTES=50' "$CONF" || die "rejected install rewrote the config: $(cat "$CONF")"
+# Restore a sane config for the rest of the suite.
+cat >"$CONF" <<'EOF'
+BASE_MINUTES=15
+MAX_MINUTES=525600
+EOF
+"$REPO/install.sh" --prefix "$SB/root" --user "$ME" --skill-dir "$SB/skill" >/dev/null
+ok "out-of-range and inverted configs rejected"
+
 log "sudo version comparison (>= 1.8.21 for timestamp_type)"
 bash -c '
 	. "$1/libexec/sudo-elevation/common.sh" || exit 1

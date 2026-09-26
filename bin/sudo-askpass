@@ -17,7 +17,7 @@ SELF_DIR=$(cd "$(dirname "$0")" && pwd)
 exec 3>&1
 exec 1>/dev/null
 
-se_load_config
+se_load_config "$(id -un)"
 se_apply_gui_backend "$GUI_BACKEND"
 
 ui=${SUDO_ELEVATION_UI:-auto}

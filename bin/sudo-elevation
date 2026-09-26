@@ -69,7 +69,7 @@ case "$cmd" in
 		done
 		[ -n "$spec" ] || { echo "request: --for is required (example: --for 2h)" >&2; exit 2; }
 		minutes=$(se_parse_minutes "$spec") || { echo "request: bad duration: $spec (single value+unit: 90s/45m/2h/1d/bare-minutes/until-lock; 1m30s invalid, use 90s)" >&2; exit 2; }
-		se_load_config
+		se_load_config "$ME"
 		se_valid_minutes "$minutes" || {
 			echo "request: duration out of range: $spec (max $MAX_MINUTES minutes; use until-lock for infinity)" >&2
 			exit 2
@@ -139,7 +139,7 @@ case "$cmd" in
 				*) echo "status: unknown argument: $1" >&2; exit 2 ;;
 			esac
 		done
-		se_load_config
+		se_load_config "$ME"
 		lease=$(se_lease_file "$ME")
 		if [ -f "$lease" ]; then
 			minutes=$(se_read_kv "$lease" minutes || true)
@@ -221,7 +221,7 @@ case "$cmd" in
 		exit 0
 		;;
 	lock)
-		se_load_config
+		se_load_config "$ME"
 		restored=0
 		timed_out=0
 		if sudo -n "$RESTORE_BIN" --user "$ME" --force --config-file "$SE_CONFIG" >/dev/null 2>&1; then

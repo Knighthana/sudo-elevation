@@ -34,6 +34,24 @@ EXPLICIT=0
 KEEP=0
 BASE_SPEC="15m"
 MAX_SPEC="365d"
+# Whether the admin passed --base-timeout/--max-timeout on THIS run. An omitted
+# flag must not overwrite what the config already says (see reconcile_config).
+BASE_SET=0
+MAX_SET=0
+# Which config layer supplied each key, filled in by reconcile_config.
+CFG_BASE_SRC=default
+CFG_MAX_SRC=default
+CFG_DIALOG_SRC=default
+CFG_TTL_SRC=default
+CFG_GUI_SRC=default
+# The machine layer's own value per key, from se_report_layer. Filled in by
+# reconcile_config; used to avoid writing another account's override into
+# the host-wide file.
+MAC_BASE=15
+MAC_MAX=525600
+MAC_DIALOG=300
+MAC_TTL=300
+MAC_GUI=auto
 DRY=0
 FORCE=0
 DO_SKILL=1
@@ -131,8 +149,8 @@ EOF
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--user) [ $# -ge 2 ] || die "--user needs a value"; TARGET_USER=$2; EXPLICIT=1; shift 2 ;;
-		--base-timeout) [ $# -ge 2 ] || die "--base-timeout needs a value"; BASE_SPEC=$2; shift 2 ;;
-		--max-timeout) [ $# -ge 2 ] || die "--max-timeout needs a value"; MAX_SPEC=$2; shift 2 ;;
+		--base-timeout) [ $# -ge 2 ] || die "--base-timeout needs a value"; BASE_SPEC=$2; BASE_SET=1; shift 2 ;;
+		--max-timeout) [ $# -ge 2 ] || die "--max-timeout needs a value"; MAX_SPEC=$2; MAX_SET=1; shift 2 ;;
 		--prefix) [ $# -ge 2 ] || die "--prefix needs a value"; PREFIX=$2; EXPLICIT=1; shift 2 ;;
 		--user-install) USER_INSTALL=1; EXPLICIT=1; shift ;;
 		--no-system) NO_SYSTEM=1; EXPLICIT=1; shift ;;
@@ -249,21 +267,95 @@ check_foreign_askpass() {
 	rm -f "$tmp"
 }
 
+# Precedence: explicit flag > existing config layer > built-in default.
+# Runs as the FIRST statement of do_install, because BASE_MINUTES/MAX_MINUTES
+# are not just config-file content: they also drive the sudoers drop-in, the
+# manifest, the summary and SKILL.md. Resolving them only inside write_config()
+# would leave /etc/sudo-elevation.conf disagreeing with sudoers.
+reconcile_config() {
+	local flag_base=$BASE_MINUTES flag_max=$MAX_MINUTES
+	# SRC_* records whether a layer supplied each key, which is what
+	# write_config() needs. A diff against the pre-load value cannot tell
+	# "absent" from "present and equal to the default".
+	se_load_config "$TARGET_USER"
+	CFG_BASE_SRC=$BASE_MINUTES_SRC
+	CFG_MAX_SRC=$MAX_MINUTES_SRC
+	CFG_DIALOG_SRC=$DIALOG_TIMEOUT_SRC
+	CFG_TTL_SRC=$REQUEST_TTL_SRC
+	CFG_GUI_SRC=$GUI_BACKEND_SRC
+	# What the machine layer says on its own. Written back below whenever an
+	# account layer is the one currently winning, so a per-account override
+	# never overwrites (or erases) host policy.
+	local k v
+	while IFS=$'\t' read -r k v; do
+		case "$k" in
+			BASE) MAC_BASE=$v ;;
+			MAX) MAC_MAX=$v ;;
+			DIALOG) MAC_DIALOG=$v ;;
+			TTL) MAC_TTL=$v ;;
+			GUI) MAC_GUI=$v ;;
+		esac
+	done < <(se_report_layer machine "$TARGET_USER")
+	# An explicit flag always wins; otherwise whatever a layer resolved to
+	# stands, which is simply the untouched default when no layer had it.
+	if [ "$BASE_SET" = 1 ]; then
+		BASE_MINUTES=$flag_base
+	fi
+	if [ "$MAX_SET" = 1 ]; then
+		MAX_MINUTES=$flag_max
+	fi
+	# A hand-edited config must satisfy the same bounds the flags do, or it
+	# could render an unusable sudoers drop-in (visudo would reject it) or
+	# authorise an absurd window. se_valid_minutes compares against the
+	# resolved MAX_MINUTES, so it also rejects BASE > MAX for us.
+	se_valid_max "$MAX_MINUTES" \
+		|| die "MAX_MINUTES=$MAX_MINUTES from config is out of range (0..$SE_MAX_MINUTES_CAP)"
+	se_valid_minutes "$BASE_MINUTES" \
+		|| die "BASE_MINUTES=$BASE_MINUTES from config is out of range (0..MAX_MINUTES=$MAX_MINUTES, and BASE must be <= MAX)"
+}
+
 write_config() {
 	local tmp
 	tmp=$(mktemp)
 	{
 		printf '# sudo-elevation configuration (managed by install.sh).\n'
+		printf '# Machine-wide policy. A per-account override in\n'
+		printf '# ~/.config/sudo-elevation/config wins over every key below.\n'
+		printf '# Values already here are preserved across reinstall unless the\n'
+		printf '# matching --base-timeout/--max-timeout flag is passed explicitly.\n'
 		printf '# Numeric values are minutes; fractions allowed.\n'
-		printf 'BASE_MINUTES=%s\n' "$BASE_MINUTES"
-		printf 'MAX_MINUTES=%s\n' "$MAX_MINUTES"
-		printf 'DIALOG_TIMEOUT=%s\n' "$DIALOG_TIMEOUT"
-		printf 'REQUEST_TTL=%s\n' "$REQUEST_TTL"
-		printf 'GUI_BACKEND=auto\n'
+		# Every key is rewritten, so a hand-edited machine file survives a
+		# reinstall. Which value goes in depends on who owns the key:
+		#   - resolved from the file we manage, or from nobody  -> resolved
+		#   - resolved from ANOTHER account's layer             -> the machine
+		#     layer's own value. Copying the account's value would freeze one
+		#     user's preference as host policy; omitting the key would delete
+		#     whatever the host had deliberately set.
+		case "$CFG_BASE_SRC" in
+			*:"$SE_CONFIG"|default) printf 'BASE_MINUTES=%s\n' "$BASE_MINUTES" ;;
+			*) printf 'BASE_MINUTES=%s\n' "$MAC_BASE" ;;
+		esac
+		case "$CFG_MAX_SRC" in
+			*:"$SE_CONFIG"|default) printf 'MAX_MINUTES=%s\n' "$MAX_MINUTES" ;;
+			*) printf 'MAX_MINUTES=%s\n' "$MAC_MAX" ;;
+		esac
+		case "$CFG_DIALOG_SRC" in
+			*:"$SE_CONFIG"|default) printf 'DIALOG_TIMEOUT=%s\n' "$DIALOG_TIMEOUT" ;;
+			*) printf 'DIALOG_TIMEOUT=%s\n' "$MAC_DIALOG" ;;
+		esac
+		case "$CFG_TTL_SRC" in
+			*:"$SE_CONFIG"|default) printf 'REQUEST_TTL=%s\n' "$REQUEST_TTL" ;;
+			*) printf 'REQUEST_TTL=%s\n' "$MAC_TTL" ;;
+		esac
+		case "$CFG_GUI_SRC" in
+			*:"$SE_CONFIG"|default) printf 'GUI_BACKEND=%s\n' "$GUI_BACKEND" ;;
+			*) printf 'GUI_BACKEND=%s\n' "$MAC_GUI" ;;
+		esac
 	} > "$tmp"
 	run se_install_file "$tmp" "$SE_CONFIG" 0644
 	rm -f "$tmp"
 }
+
 
 # True when our marker block in $SE_SUDO_CONF points `Path askpass` into the
 # target user's own home. That is the hijack: a machine-global directive
@@ -432,6 +524,10 @@ do_install() {
 	if [ "$INSTALLED_MODE" = 1 ]; then
 		die "install requires the repository checkout (the installed copy under libexec only supports --uninstall/--version/--help)"
 	fi
+
+	# Before any output or write: the effective base/max window decides the
+	# sudoers drop-in, the manifest and the summary below, not just the config.
+	reconcile_config
 
 	say "sudo-elevation $VERSION"
 	say "  user: $TARGET_USER"

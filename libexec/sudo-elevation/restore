@@ -39,7 +39,7 @@ if [ -n "$config_file" ]; then
 	# shellcheck disable=SC2034  # consumed by se_load_config below
 	SUDO_ELEVATION_CONFIG=$config_file
 fi
-se_load_config
+se_load_config "$user"
 
 lease=$(se_lease_file "$user")
 if [ "$force" != 1 ]; then

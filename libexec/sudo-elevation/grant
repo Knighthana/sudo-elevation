@@ -60,7 +60,7 @@ if [ -n "$config_file" ]; then
 	# shellcheck disable=SC2034  # consumed by se_load_config below
 	SUDO_ELEVATION_CONFIG=$config_file
 fi
-se_load_config
+se_load_config "$user"
 
 if [ -n "$choice_file" ]; then
 	chosen=$(se_read_kv "$choice_file" chosen_minutes || true)

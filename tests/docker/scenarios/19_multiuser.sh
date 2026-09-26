@@ -174,6 +174,44 @@ grep -qF 'SE-USER-ASKPASS-INVOKED' <<<"$out" \
 assert_contains /run/sudo-elevation/tester.lease "reason=explicit askpass"
 ok "caller-provided helper respected"
 
+log "a per-account config layer narrows the machine policy, tree-independent"
+UCFG=/home/tester/.config/sudo-elevation/config
+assert_contains /etc/sudo-elevation.conf "MAX_MINUTES=525600"
+mkdir -p "$(dirname "$UCFG")"
+printf 'MAX_MINUTES=60\nBASE_MINUTES=5\n' >"$UCFG"
+chown -R tester /home/tester/.config/sudo-elevation
+# 120 minutes is fine for the host (MAX 525600) but over this account's own cap.
+out=$(as_tester sudo -n "$GRANT" --user tester --minutes 120 2>&1) \
+	&& die "grant ignored the per-account MAX_MINUTES: $out"
+grep -qF 'allowed: 0..60 minutes' <<<"$out" || die "cap not reported: $out"
+ok "per-account cap enforced by the root helper"
+# And the cap is the user's own, not the host's: 60 must still be grantable.
+as_tester sudo -n "$GRANT" --user tester --minutes 60 >/dev/null 2>&1 \
+	|| die "grant rejected a duration at the account's own cap"
+assert_contains /etc/sudoers.d/90-sudo-elevation-tester "timestamp_timeout=60"
+# bob is unaffected: the layer is per account, and bob has no config file.
+"$GRANT" --user bob --minutes 120 >/dev/null 2>&1 \
+	|| die "another account inherited tester's cap"
+"$RESTORE" --user bob --force >/dev/null 2>&1
+ok "the cap did not leak to another account"
+# The base window is layered too, which the CLI reports.
+out=$(runuser -u tester -- /usr/local/bin/sudo-elevation status --porcelain)
+grep -qF 'base_minutes=5' <<<"$out" || die "CLI did not use the per-account base window: $out"
+ok "per-account base window reaches the CLI"
+# Installing must not freeze the account's preference into the machine file.
+"$REPO/install.sh" --user tester --test-hooks >/dev/null 2>&1
+assert_not_contains /etc/sudo-elevation.conf "MAX_MINUTES=60"
+assert_contains /etc/sudo-elevation.conf "MAX_MINUTES=525600"
+rm -f "$UCFG"
+ok "install left the machine policy alone"
+
+log "policy is tree-independent: the system CLI honours the same account layer"
+out=$(env -u XDG_CONFIG_HOME HOME=/home/tester bash -c \
+	'SUDO_ELEVATION_CONFIG=/etc/sudo-elevation.conf . /usr/local/libexec/sudo-elevation/common.sh; se_load_config tester; printf "base=%s src=%s\n" "$BASE_MINUTES" "$BASE_MINUTES_SRC"')
+grep -qF "base=5 src=user:$UCFG" <<<"$out" \
+	|| die "machine tree ignored the account layer: $out"
+ok "same effective policy from either tree"
+
 log "teardown: end every lease and both trees, so no restore sleeper lingers"
 runuser -u tester -- /home/tester/.local/bin/sudo-elevation lock >/dev/null 2>&1 || true
 "$REPO/install.sh" --user-install --user tester --uninstall --keep >/dev/null 2>&1 || true

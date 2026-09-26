@@ -64,17 +64,65 @@ SE_LOG="${SUDO_ELEVATION_LOG:-$(se_path /var/log/sudo-elevation.log)}"
 
 SE_VERSION="$(cat "$SE_SHARE/VERSION" 2>/dev/null || printf 'dev')"
 
-# Defaults; overridden by SE_CONFIG (see se_load_config).
+# Defaults; the config layers below override them (see se_load_config).
 BASE_MINUTES=15
 MAX_MINUTES=525600
 DIALOG_TIMEOUT=300
 REQUEST_TTL=300
 GUI_BACKEND=auto
+# Where each key's effective value came from: "default", "machine:<path>" or
+# "user:<path>". `sudo-elevation status` shows this so a surprising value is
+# explainable instead of mysterious.
+BASE_MINUTES_SRC=default
+MAX_MINUTES_SRC=default
+DIALOG_TIMEOUT_SRC=default
+REQUEST_TTL_SRC=default
+GUI_BACKEND_SRC=default
 
-se_load_config() {
-	local file="${SUDO_ELEVATION_CONFIG:-$SE_CONFIG}"
+# The per-user config layer: <user's config dir>/sudo-elevation/config.
+# A non-root caller IS the account in question, so $HOME is authoritative and
+# we skip the getent lookup (this runs in the askpass hot path). Root has to
+# resolve the named account, and must never inherit root's own XDG_* -- same
+# rule the installer follows. A --prefix sandbox has no real user layer: the
+# fake root and the developer's home must not bleed into each other.
+se_user_config_path() { # user
+	local u=${1-} home conf
+	[ -z "$SE_PREFIX" ] || return 0
+	if [ "$(id -u 2>/dev/null || printf 0)" != 0 ]; then
+		[ -n "${HOME:-}" ] || return 0
+		conf=${XDG_CONFIG_HOME:-$HOME/.config}
+		printf '%s/sudo-elevation/config' "$conf"
+		return 0
+	fi
+	[ -n "$u" ] || return 0
+	home=$(se_home_of "$u")
+	[ -n "$home" ] || return 0
+	printf '%s/.config/sudo-elevation/config' "$home"
+}
+
+# Config layers in increasing priority, as "label<TAB>path" lines. The label
+# says who the policy belongs to, which is what `status` reports: "machine" for
+# host-wide /etc policy, "user" for one account's own overrides. A user install
+# points SE_CONFIG at the user layer already (through its receipt), so that same
+# file is labelled "user" and never read twice.
+se_config_layers() { # user
+	local machine user_layer mlabel
+	machine=${SUDO_ELEVATION_CONFIG:-$SE_CONFIG}
+	user_layer=$(se_user_config_path "${1-}")
+	mlabel=machine
+	if [ -n "$user_layer" ] && [ "$user_layer" = "$machine" ]; then
+		mlabel=user
+	fi
+	[ -n "$machine" ] && printf '%s\t%s\n' "$mlabel" "$machine"
+	if [ -n "$user_layer" ] && [ "$user_layer" != "$machine" ]; then
+		printf 'user\t%s\n' "$user_layer"
+	fi
+	return 0
+}
+
+se_load_config_file() { # file layer
+	local file=$1 layer=$2 line key val
 	[ -r "$file" ] || return 0
-	local line key val
 	while IFS= read -r line || [ -n "$line" ]; do
 		case "$line" in ''|'#'*) continue ;; esac
 		key=${line%%=*}
@@ -82,7 +130,10 @@ se_load_config() {
 		case "$key" in
 			GUI_BACKEND)
 				case "$val" in
-					auto|x11|wayland) GUI_BACKEND=$val ;;
+					auto|x11|wayland)
+						GUI_BACKEND=$val
+						GUI_BACKEND_SRC="$layer:$file"
+					;;
 				esac
 				continue
 				;;
@@ -94,12 +145,46 @@ se_load_config() {
 			''|*[^0-9.]*|*.*.*|.*|*.) continue ;;
 		esac
 		case "$key" in
-			BASE_MINUTES) BASE_MINUTES=$val ;;
-			MAX_MINUTES) MAX_MINUTES=$val ;;
-			DIALOG_TIMEOUT) DIALOG_TIMEOUT=$val ;;
-			REQUEST_TTL) REQUEST_TTL=$val ;;
+			BASE_MINUTES) BASE_MINUTES=$val; BASE_MINUTES_SRC="$layer:$file" ;;
+			MAX_MINUTES) MAX_MINUTES=$val; MAX_MINUTES_SRC="$layer:$file" ;;
+			DIALOG_TIMEOUT) DIALOG_TIMEOUT=$val; DIALOG_TIMEOUT_SRC="$layer:$file" ;;
+			REQUEST_TTL) REQUEST_TTL=$val; REQUEST_TTL_SRC="$layer:$file" ;;
 		esac
 	done < "$file"
+}
+
+# se_report_layer LABEL [user] -- print "KEY<TAB>value" for one layer only,
+# resolved against the built-in defaults. Mutates the config globals, so callers
+# must use it in a command substitution (subshell). It exists so the installer
+# can tell "the host set this" from "an account currently overrides it": without
+# it, writing the resolved value would freeze one account's temporary override
+# into the machine file, and skipping the key would drop the host's own policy.
+se_report_layer() { # label [user]
+	local label=$1 layer file
+	BASE_MINUTES=15
+	MAX_MINUTES=525600
+	DIALOG_TIMEOUT=300
+	REQUEST_TTL=300
+	GUI_BACKEND=auto
+	while IFS=$'\t' read -r layer file; do
+		[ -n "$file" ] || continue
+		[ "$layer" = "$label" ] || continue
+		se_load_config_file "$file" "$layer"
+	done < <(se_config_layers "${2-}")
+	printf 'BASE\t%s\nMAX\t%s\nDIALOG\t%s\nTTL\t%s\nGUI\t%s\n' \
+		"$BASE_MINUTES" "$MAX_MINUTES" "$DIALOG_TIMEOUT" "$REQUEST_TTL" "$GUI_BACKEND"
+}
+
+# se_load_config [user] -- resolve every key through the layers. Later layers
+# overwrite earlier ones, so a user's own file narrows or widens host policy
+# without anyone editing the host-wide file. Process substitution (not a pipe)
+# keeps the assignments in this shell.
+se_load_config() {
+	local layer file
+	while IFS=$'\t' read -r layer file; do
+		[ -n "$file" ] || continue
+		se_load_config_file "$file" "$layer"
+	done < <(se_config_layers "${1-}")
 }
 
 # WSLg's Wayland compositor mishandles GTK4 popup/menu input; XWayland works.
@@ -149,6 +234,19 @@ se_valid_minutes() {
 	[ "$m" = "-1" ] && return 0
 	case "$m" in ''|*[!0-9.]*) return 1 ;; esac
 	awk -v m="$m" -v max="$MAX_MINUTES" 'BEGIN{exit !(m+0 >= 0 && m+0 <= max+0)}'
+}
+
+# Hard ceiling for MAX_MINUTES, deliberately independent of the resolved max:
+# se_valid_minutes compares against $MAX_MINUTES, so validating the max against
+# itself can never fail. Without an absolute cap a typo'd MAX_MINUTES (or a
+# hand-edited config) would authorise a window measured in decades.
+SE_MAX_MINUTES_CAP=525600
+
+se_valid_max() { # minutes
+	local m=${1-}
+	case "$m" in ''|*[!0-9.]*) return 1 ;; esac
+	awk -v m="$m" -v cap="$SE_MAX_MINUTES_CAP" \
+		'BEGIN{exit !(m+0 >= 0 && m+0 <= cap+0)}'
 }
 
 # Duration spec is single value + single unit only (90s/45m/2h/1d/bare/until-lock);
