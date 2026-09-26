@@ -202,10 +202,12 @@ shellcheck + host 沙箱 + Docker 矩阵。
   （本机 PID1 为 WSL `init`，走 `setsid`；需启用 systemd 的 Ubuntu 桌面）、
   `GUI_BACKEND=wayland` 覆盖。
 - ⏳ **用户通道的 askpass 兜底路径**（本次新增，CI 只能证明变量送到了 sudo）：
-  还需在任一 X11/Wayland 真机上确认两件 **sudo 自身**的行为——(1) `sudo -A`
-  是否把 `DISPLAY`/`XAUTHORITY` 传给 askpass；(2) sudo 是否校验 askpass 程序属主
-  （用户属主的 `~/.local/bin/sudo-askpass` 是否被接受）。这两条与 WSLg 无关，
-  任何桌面发行版上都成立；任一条不成立，用户通道的图形 `request` 就是不可用。
+  还需在任一 X11/Wayland 真机上确认 `sudo -A` 是否把 `DISPLAY`/`XAUTHORITY` 传给
+  askpass。这两条与 WSLg 无关，是 **sudo 自身的行为**，任何桌面发行版上都成立；
+  不成立则用户通道的图形 `request` 不可用。探针（会输一次口令，不落地）：
+  `tests/manual/askpass-env.sh` 先只读预检，`--yes run` 真跑一次。
+  助手属主那条（sudo 是否拒绝非 root 拥有的 askpass）已由 `19_multiuser` 在
+  sudo 1.9.15p5 / 1.9.13p3 上覆盖。
 - ⏳ `lock` tty 回退真机半自动：`tests/manual/lock-tty.sh check` 只读预检；
   空闲时 `--yes timeout-only`（全自动约 40s）或有 tty `--yes all`（输 1 次口令约 1min）。不进 CI。
 

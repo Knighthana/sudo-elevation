@@ -58,7 +58,7 @@ jobs:
             tests/docker/fake-askpass-kdialog tests/docker/stubs/kdialog \
             tests/docker/fake-askpass-kdialog-slow tests/docker/stubs-slow/kdialog \
             tests/docker/scenarios/*.sh \
-            tests/manual/lock-tty.sh
+            tests/manual/lock-tty.sh tests/manual/askpass-env.sh
 
       # Runner env notes (hosted ubuntu-latest): passwordless sudo, no tty for
       # the step, and actions/checkout exports XDG_CONFIG_HOME/HOME overrides
