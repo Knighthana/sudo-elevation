@@ -44,15 +44,14 @@ jobs:
       # `pipefail` here so a failing test aborts the step instead of being
       # masked by a later command, and echo the log tail on failure so the
       # cause is visible on the run page without downloading job logs.
-      # Each step reports its own wall time so the split (test wait vs build
-      # IO) is measurable without a profiling harness.
+      # No per-step timing echo: the Actions API already reports step
+      # durations, and run.sh prints its own build/scenario ledger for the
+      # sub-step breakdown the step view cannot show.
       - name: Host sandbox tests
         run: |
           set -o pipefail
-          t0=$SECONDS
           ./tests/run-host.sh 2>&1 | tee host-tests.log
           rc=${PIPESTATUS[0]}
-          echo "::notice::host step: $(( SECONDS - t0 ))s"
           if [ "$rc" -ne 0 ]; then
             echo "::error::host tests failed (rc=$rc) - last 40 lines:"
             tail -n 40 host-tests.log
@@ -62,11 +61,8 @@ jobs:
       - name: Docker matrix (Ubuntu 24.04 + Debian 12)
         run: |
           set -o pipefail
-          t0=$SECONDS
           tests/docker/run.sh 2>&1 | tee docker-tests.log
           rc=${PIPESTATUS[0]}
-          n=$(grep -c '^  --> PASS' docker-tests.log || true)
-          echo "::notice::docker step: $(( SECONDS - t0 ))s, $n scenarios passed"
           if [ "$rc" -ne 0 ]; then
             echo "::error::docker matrix failed (rc=$rc) - last 40 lines:"
             tail -n 40 docker-tests.log
