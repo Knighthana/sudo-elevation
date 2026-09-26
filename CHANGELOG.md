@@ -66,12 +66,12 @@
   不覆盖显式值），用户通道因此有了自己的弹窗入口；裸 `sudo -A` 仍需系统通道。
   旧版留下的、指向目标用户家目录的 marker 块会被清理并备份；指向系统路径的
   块（属于系统安装）不动。
-  **待真机确认**：这条路径还依赖一件本仓库自动化测不到、且与 WSLg 无关而是
-  **sudo 自身行为**的事——`sudo -A` 是否把 `DISPLAY`/`XAUTHORITY` 传给 askpass。
-  容器无 X/Wayland socket，CI 永远测不到；不成立则用户通道图形路径是 inert 的。
-  探针 `tests/manual/askpass-env.sh`（`--yes run` 会输一次口令，不落地）可给出结论。
-  另一半问题「sudo 是否校验 askpass 属主」已由 `19_multiuser` 覆盖：那里把助手
-  chown 给普通用户后 `sudo -A` 正常执行了它（sudo 1.9.15p5 / 1.9.13p3）。
+  **已真机确认**（2026-09-26，sudo 1.9.15p5 / Linux Mint 22.3 / X11 + zenity）：
+  `sudo -A` 把 `DISPLAY` 与 `XAUTHORITY` 都原样传给了 askpass 助手，**且接受由普通
+  用户自己拥有（非 root）的助手**并真实完成认证——两者都成立，用户通道图形路径可用。
+  探针见 `tests/manual/askpass-env.sh`（`--yes run` 输一次口令，不落地）。这两条都是
+  **sudo 自身行为、与 WSLg 无关**，任何桌面发行版都适用；属主那条另有 `19_multiuser`
+  在 sudo 1.9.15p5 / 1.9.13p3 上的容器内覆盖。
 - security: `grant`/`restore`/`common.sh`/`$SE_SHARE` 在**所有**布局下保持
   `root:root`——删掉了 `chown -R "$SE_LIBEXEC"`。这两个 helper 经 sudo 以 root
   执行，交给目标用户就等于交出 root 代码注入点。CLI 只需可读可执行。

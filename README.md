@@ -201,13 +201,14 @@ shellcheck + host 沙箱 + Docker 矩阵。
 - ⏳ 仍待手测：kdialog 真实弹窗（需 KDE 环境）、`systemd-run` 恢复分支
   （本机 PID1 为 WSL `init`，走 `setsid`；需启用 systemd 的 Ubuntu 桌面）、
   `GUI_BACKEND=wayland` 覆盖。
-- ⏳ **用户通道的 askpass 兜底路径**（本次新增，CI 只能证明变量送到了 sudo）：
-  还需在任一 X11/Wayland 真机上确认 `sudo -A` 是否把 `DISPLAY`/`XAUTHORITY` 传给
-  askpass。这两条与 WSLg 无关，是 **sudo 自身的行为**，任何桌面发行版上都成立；
-  不成立则用户通道的图形 `request` 不可用。探针（会输一次口令，不落地）：
-  `tests/manual/askpass-env.sh` 先只读预检，`--yes run` 真跑一次。
-  助手属主那条（sudo 是否拒绝非 root 拥有的 askpass）已由 `19_multiuser` 在
-  sudo 1.9.15p5 / 1.9.13p3 上覆盖。
+- ✅ **用户通道 askpass 兜底路径已通过**（2026-09-26，sudo 1.9.15p5 / Linux Mint 22.3
+  / X11 + zenity）：`sudo -A` 把 `DISPLAY` 与 `XAUTHORITY` 都原样传给 askpass 助手，
+  且接受由普通用户自己拥有（非 root）的助手并真实完成认证。探针
+  `tests/manual/askpass-env.sh`（`--yes run` 输一次口令，不落地）可复现。
+  助手属主那条另有 `19_multiuser` 在 sudo 1.9.15p5 / 1.9.13p3 上的容器内覆盖。
+  两者都是 **sudo 自身行为、与 WSLg 无关**。
+  尚未合并跑过的一步只有「用户通道安装 → CLI → 真 askpass → 真 zenity 弹窗」这
+  一条完整链路（各环节已分别验证），需要 root 装一次再 purge，故未纳入常规手测。
 - ⏳ `lock` tty 回退真机半自动：`tests/manual/lock-tty.sh check` 只读预检；
   空闲时 `--yes timeout-only`（全自动约 40s）或有 tty `--yes all`（输 1 次口令约 1min）。不进 CI。
 
